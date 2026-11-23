@@ -27,7 +27,12 @@ lại các quyết định kỹ thuật cùng bài học khi triển khai để 
 rawpeg/
 ├── Cargo.toml
 ├── PLAN.md                        # file này
-├── scripts/fetch_samples.sh       # tải RAW mẫu CC0 từ raw.pixls.us
+├── .github/
+│   ├── workflows/ci.yml           # ✅ CI build check: Windows x64 + macOS universal
+│   └── macos/Info.plist           # bundle metadata cho rawpeg.app
+├── scripts/
+│   ├── fetch_samples.sh           # tải RAW mẫu CC0 từ raw.pixls.us
+│   └── package_macos.sh           # gói binary(s) → rawpeg.app + zip (CI + local)
 ├── src/
 │   ├── lib.rs                     # pub mod app / models / raw_engine
 │   ├── main.rs                    # eframe entry (windows_subsystem cho release)
@@ -105,10 +110,12 @@ RAW file
 - Progress modal + Cancel.
 - ⚠️ **Đánh giá demosaic chất lượng cao** (xem mục 7).
 
-### ⏳ Milestone 5 — GitHub Actions CI/CD
-- `.github/workflows/release.yml`: matrix macOS ARM (`macos-14`, `.app.zip`), macOS Intel
-  (`macos-13`, `.app.zip` — ⚠️ runner có thể bị retire), Windows (`windows-latest`, exe + winres icon).
-- Upload artifacts lên GitHub Releases; trigger tag `v*` + `workflow_dispatch`.
+### ⏳ Milestone 5 — GitHub Actions CI/CD (đang làm dở)
+- ✅ **CI build check đã chạy thành công** (run #45201774320, 2026-11-23):
+  - `windows-latest` → `rawpeg-windows-x64.zip` (rawpeg.exe, PE32+ GUI x86-64, 8.8MB)
+  - `macos-latest` → `rawpeg-macos-universal.zip` (rawpeg.app, fat binary x86_64+arm64, 12.2MB)
+- ⏳ Còn lại: trigger tag `v*` → tạo GitHub Release tự động (softprops/action-gh-release),
+  icon Windows (dùng `embed-resource`, không dùng `winres` đã stale).
 
 ## 6. Testing strategy
 - **Fixture DNG 12x12 RGGB** sinh trong `tests/common/mod.rs` (TIFF writer thủ công):
@@ -134,7 +141,9 @@ RAW file
 5. **`output_16bit` KHÔNG gamma** (linear) dù struct doc ghi "sRGB": dựa vào `settings.linear`.
 6. **Basecurve** phải tắt để có highlight headroom trong buffer chỉnh sửa.
 7. **CI: không có thư viện C ngoài** (mọi crate đều pure Rust) — bỏ `mozjpeg`/`libraw-sys`.
-8. macOS Intel runner `macos-13` có thể bị GitHub retire — có fallback "skip Intel nếu unavailable".
+8. **Runner macOS Intel đã retire** (`macos-13`/`macos-14` không còn trên GitHub Actions,
+   11/2026). Standard runner `macos-latest` chỉ là ARM64. Giải pháp: build **universal
+   binary** (lipo) ngay trên runner arm64 — 1 artifact chạy cả Intel lẫn Apple Silicon.
 
 ## 8. Command thường dùng
 ```bash
