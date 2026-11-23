@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: rawpeg-windows-x64.zip
+            targets: ""
+          - os: macos-latest
+            artifact: rawpeg-macos-universal.zip
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test (debug)
+        run: cargo test --locked
+
+      - name: Build release (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --locked
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Force -Path target/release/rawpeg.exe -DestinationPath rawpeg-windows-x64.zip
+
+      - name: Build release (macOS, universal)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Package (macOS, universal .app)
+        if: runner.os == 'macOS'
+        run: |
+          ./scripts/package_macos.sh \
+            target/aarch64-apple-darwin/release/rawpeg \
+            target/x86_64-apple-darwin/release/rawpeg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
