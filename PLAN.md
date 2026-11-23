@@ -48,7 +48,13 @@ rawpeg/
 └── tests/
     ├── common/mod.rs              # fixture DNG 12x12 RGGB tự sinh (TIFF writer)
     ├── decoder_tests.rs           # ✅ 8 tests + 1 ignored (RAW thật)
-    └── processor_tests.rs         # ✅ 6 tests (apply/encode_srgb/auto_tone trên fixture)
+    ├── processor_tests.rs         # ✅ 6 tests (apply/encode_srgb/auto_tone trên fixture)
+    └── real_pipeline_tests.rs     # ✅ ignored: full pipeline trên RAW thật (RAW_DIR, mặc định ./rawimage)
+```
+
+Ngoài ra (công cụ dev, không nằm trong `cargo test` gate):
+```
+examples/render_previews.rs      # render PNG+JPEG full-res để soi bằng mắt (--max-dim N)
 ```
 
 ## 3. Data flow (bắt buộc giữ đúng)
@@ -133,6 +139,11 @@ RAW file
   số VALUE (không phải số byte); imagepipe cần ảnh ≥ 10x10 (`owidth-10`).
 - Test ignored `decode_real_sample_requires_env`: cần `RAW_SAMPLE=<path>`
   (xem `scripts/fetch_samples.sh`).
+- **Real-sample pipeline test** `real_pipeline_tests.rs` (ignored): chạy toàn bộ
+  pipeline trên mọi RAW trong thư mục `RAW_DIR` (mặc định `./rawimage`):
+  `RAW_DIR=rawimage cargo test --test real_pipeline_tests -- --ignored --nocapture`.
+  File decode-fail do rawloader không hỗ trợ được báo `UNSUPPORTED` (không fail
+  test), nhưng nếu **không file nào** decode được thì test fail.
 - Không assert channel-dominance trên fixture sạch — demosaic của imagepipe là
   window-average nên màu tinh khiết bị trộn (xem mục 7).
 
@@ -162,6 +173,14 @@ RAW file
 11. **Thứ tự pipeline cố định:** WB → exposure → H/S → contrast. Mask H/S tính trên luminance
     sau WB+exposure (theo "look" hiện tại); contrast là S-curve power quanh 0.18 với fixed point
     chính xác trong f32 (`c/c = 1.0`) giúp test deterministic.
+12. **rawloader 0.37.2 chỉ hỗ trợ camera table tới ~2019** (Sony đến ILCE-7M3/ILCE-6500). Verify
+    11/2026 trên `rawimage/`: Canon 60D CR2, Nikon D750 NEF, Sony ILCE-6500 ARW decode OK;
+    **fail** — Sony ILCE-7M4/7RM5 ARW (`Couldn't find camera` trong `check_supported`) và DNG
+    Samsung Galaxy S25 (compression `0xffffcd42` → panic `ifds[0]` trong `dng.rs`, bị catch →
+    "Don't know how to decode"). Khi báo lỗi user đừng đổ lỗi pipeline; ghi rõ đây là giới hạn
+    library. M4 cần cân nhắc `rawler 0.8`/libraw để mở rộng hỗ trợ máy ảnh mới.
+13. **Thêm `--max-dim` cho tool render preview:** full-res 9 ảnh ~1GB đĩa + ~2 phút; cap
+    `--max-dim 2560` đủ soi chi tiết mà đĩa nhanh hơn nhiều.
 
 ## 8. Command thường dùng
 ```bash
@@ -171,4 +190,6 @@ cargo clippy --all-targets     # 0 warning bắt buộc
 cargo run                      # chạy GUI
 ./scripts/fetch_samples.sh [dir]
 RAW_SAMPLE=dir/canon_6d.cr2 cargo test --test decoder_tests decode_real_sample -- --ignored
+RAW_DIR=rawimage cargo test --test real_pipeline_tests -- --ignored --nocapture
+cargo run --example render_previews -- rawimage --max-dim 2560
 ```
