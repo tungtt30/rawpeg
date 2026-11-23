@@ -39,15 +39,16 @@ rawpeg/
 │   ├── app.rs                     # ★ M3: state + UI egui (hiện chỉ window trống)
 │   ├── raw_engine/
 │   │   ├── decoder.rs             # ✅ M1 XONG
-│   │   ├── processor.rs           # ⏳ M2: chỉnh exposure/contrast/highlights/shadows/WB
-│   │   ├── auto_tone.rs           # ⏳ M2: histogram → auto exposure
+│   │   ├── processor.rs           # ✅ M2 XONG
+│   │   ├── auto_tone.rs           # ✅ M2 XONG
 │   │   └── exporter.rs            # ⏳ M4: batch export rayon + jpeg-encoder
 │   └── models/
 │       ├── edit_params.rs         # ✅ M1 XONG (EditParams + tests)
 │       └── image_item.rs          # ✅ M1 XONG (ImageItem, ExifSummary, EditStatus)
 └── tests/
     ├── common/mod.rs              # fixture DNG 12x12 RGGB tự sinh (TIFF writer)
-    └── decoder_tests.rs           # ✅ 8 tests + 1 ignored (RAW thật)
+    ├── decoder_tests.rs           # ✅ 8 tests + 1 ignored (RAW thật)
+    └── processor_tests.rs         # ✅ 6 tests (apply/encode_srgb/auto_tone trên fixture)
 ```
 
 ## 3. Data flow (bắt buộc giữ đúng)
@@ -90,15 +91,23 @@ RAW file
 - Cargo.toml + scaffold đầy đủ, decoder + models + tests.
 - **Gate đã qua:** `cargo check`, `cargo test`, `cargo clippy --all-targets` (0 warning), `cargo build` debug + release, smoke test GUI, decode thật CR2/NEF.
 
-### ⏳ Milestone 2 — Image Processing & Auto-Exposure
-1. `processor.rs`: struct `EditParams` (đã có) → hàm `apply(&DecodedImage, &EditParams) -> Vec<[f32;3]>`.
+### ✅ Milestone 2 — Image Processing & Auto-Exposure (XONG)
+1. `processor.rs`: `apply(&DecodedImage, &EditParams) -> Vec<[f32;3]>` (rayon `par_iter`).
+   - Thứ tự cố định: **WB → exposure → highlights/shadows → contrast**.
    - exposure: nhân `2^ev` trên linear.
-   - contrast: S-curve quanh 0.18 (spline/bezier).
-   - highlights/shadows: mask theo luminance, nén/kéo.
-   - WB: temp/tint → nhân channel RGB linear (tương đối với as-shot).
-2. sRGB encode cuối (`encode_srgb`) → `Vec<u8>` cho UI/export.
-3. `auto_tone.rs`: histogram luminance → `exposure/highlights/shadows` + cập nhật `EditParams`.
-4. Unit tests trên fixture DNG 12x12 (đã có builder).
+   - contrast: S-curve power quanh 0.18: `0.18·(c/0.18)^γ`, `γ = 1 + contrast·0.01`.
+   - highlights/shadows: mask lũy thừa bậc 2 theo luminance
+     (`(1−Y/0.5)²` dưới mid, `((Y−0.5)/0.5)²` trên mid), signed param, additive lift / multiplicative compress.
+   - WB: gain `[r,g,b]` tuyến tính tương đối as-shot; identity tại 6500K/0;
+     temp↑ → đỏ lên/xanh xuống; tint>0 → magenta.
+   - Buffer linear KHÔNG bị clip giữa pipeline; chỉ rolloff/clip lúc encode.
+2. `encode_srgb(&[[f32;3]]) -> Vec<u8>` — sRGB piecewise chuẩn + **soft shoulder**
+   cho giá trị > 0.8: `0.8 + 0.2·(1 − e^(−5(c−0.8)))`, C1-continuous tại 0.8, tiệm cận 1.0.
+3. `auto_tone.rs`: `auto_exposure(&DecodedImage) -> EditParams` — histogram luminance 256 bins;
+   exposure = `log2(0.18/median)` clamp ±3 EV; highlights từ 99.5th percentile sau exposure
+   (clip ≤ 0.5%); shadows từ 1st percentile; WB giữ nguyên, `is_auto_applied = true`.
+4. Tests: 17 unit (processor 12 + auto_tone 5) + 6 integration trên fixture DNG.
+- **Gate đã qua:** `cargo check`, `cargo test` (31 tests), `cargo clippy --all-targets` (0 warning), `cargo build` debug.
 
 ### ⏳ Milestone 3 — Darkroom UI (egui)
 - Thread worker + `mpsc`/`rayon`; không block UI thread.
@@ -144,6 +153,15 @@ RAW file
 8. **Runner macOS Intel đã retire** (`macos-13`/`macos-14` không còn trên GitHub Actions,
    11/2026). Standard runner `macos-latest` chỉ là ARM64. Giải pháp: build **universal
    binary** (lipo) ngay trên runner arm64 — 1 artifact chạy cả Intel lẫn Apple Silicon.
+9. **Soft shoulder cho highlight (M2):** knee dạng `1 + w(1−e^(−(c−1)/w))` gần như vô dụng
+   trong 8-bit (mọi c > 1.0 đều ra cùng code 255). Phải đặt shoulder bắt đầu tại **0.8 linear**
+   (`0.8 + 0.2·(1−e^(−5(c−0.8)))`, w = 0.2 để C1-tiếp nối) mới thấy rolloff (1.0 → ~247, 4.0 → 255).
+10. **Histogram quantization trong auto-tone:** giá trị bin = bin/255 → test phải dùng tolerance
+    (≈ ±0.05 EV) thay vì so sánh chính xác; tail > 1.0 bị nhét vào bin 255, nên highlights phải
+    tính trên `hi_after = hi·2^ev` chứ không so hi với 1.0.
+11. **Thứ tự pipeline cố định:** WB → exposure → H/S → contrast. Mask H/S tính trên luminance
+    sau WB+exposure (theo "look" hiện tại); contrast là S-curve power quanh 0.18 với fixed point
+    chính xác trong f32 (`c/c = 1.0`) giúp test deterministic.
 
 ## 8. Command thường dùng
 ```bash
