@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use rawpeg::models::EditParams;
 use rawpeg::raw_engine::auto_tone::auto_exposure;
 use rawpeg::raw_engine::decoder::{
-    decode_linear, decode_linear_scaled, decode_thumbnail_srgb, extract_exif_summary, scan_directory,
+    decode_linear, decode_linear_scaled, decode_thumbnail_srgb, extract_exif_summary, probe_support,
+    scan_directory, DecodeStatus,
 };
 use rawpeg::raw_engine::processor::{apply, apply_srgb, luminance};
 
@@ -128,7 +129,15 @@ fn full_pipeline_on_real_samples() {
         // Decode failures here are rawloader 0.37.2 library limitations
         // (e.g. Sony ILCE-7M4/7RM5, Samsung phone DNGs) — report, don't fail.
         if decode_linear(path).is_err() {
-            println!("UNSUPPORTED {}", path.display());
+            match probe_support(path) {
+                DecodeStatus::UnsupportedCamera(reason)
+                | DecodeStatus::UnsupportedFormat(reason) => {
+                    println!("UNSUPPORTED {}: {reason}", path.display());
+                }
+                _ => {
+                    println!("UNSUPPORTED {}", path.display());
+                }
+            }
             unsupported += 1;
             continue;
         }

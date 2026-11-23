@@ -3530,6 +3530,7 @@ dependencies = [
  "imagepipe",
  "kamadak-exif",
  "log",
+ "rawloader",
  "rayon",
  "rfd",
 ]

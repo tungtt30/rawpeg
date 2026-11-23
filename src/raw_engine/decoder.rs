@@ -26,6 +26,59 @@ pub struct DecodedImage {
     pub data: Vec<[f32; 3]>,
 }
 
+/// Why a raw file cannot be processed by the bundled library, classified so
+/// the UI can show a precise reason instead of a generic decode error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeStatus {
+    /// The file decodes fine.
+    Supported,
+    /// The camera model is missing from the library's camera table (rawloader
+    /// 0.37.2 only covers bodies up to ~2019).
+    UnsupportedCamera(String),
+    /// The file format/compression is not supported (e.g. phone DNGs that
+    /// make the decoder panic).
+    UnsupportedFormat(String),
+    /// Any other failure (I/O, corrupt file).
+    Error(String),
+}
+
+impl DecodeStatus {
+    /// True when the file cannot be decoded at all.
+    pub fn is_unsupported(&self) -> bool {
+        !matches!(self, DecodeStatus::Supported)
+    }
+}
+
+/// Cheaply probes whether `path` can be decoded without decoding pixel data.
+///
+/// Uses rawloader's dummy decode (metadata-only) so unsupported cameras are
+/// detected at import time and can be flagged / skipped gracefully.
+pub fn probe_support(path: &Path) -> DecodeStatus {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) => return DecodeStatus::Error(format!("open: {e}")),
+    };
+    let mut reader = BufReader::new(file);
+    match rawloader::decode_dummy(&mut reader) {
+        Ok(_) => DecodeStatus::Supported,
+        Err(e) => classify_rawloader_error(&e.to_string()),
+    }
+}
+
+/// Maps a rawloader error message to a [`DecodeStatus`].
+fn classify_rawloader_error(msg: &str) -> DecodeStatus {
+    if msg.contains("Couldn't find camera") {
+        DecodeStatus::UnsupportedCamera(msg.to_string())
+    } else if msg.contains("Caught a panic")
+        || msg.contains("Couldn't find a decoder")
+        || msg.contains("Don't know how to decode")
+    {
+        DecodeStatus::UnsupportedFormat(msg.to_string())
+    } else {
+        DecodeStatus::Error(msg.to_string())
+    }
+}
+
 /// Returns true when the file path has a raw extension.
 pub fn is_raw_path(path: &Path) -> bool {
     let ext = path
@@ -137,4 +190,56 @@ fn new_pipeline(path: &Path, max_dim: usize) -> Result<Pipeline> {
     pipeline.globals.settings.maxwidth = max_dim;
     pipeline.globals.settings.maxheight = max_dim;
     Ok(pipeline)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifier_recognizes_unsupported_camera() {
+        let status = classify_rawloader_error("Couldn't find camera \"SONY\" \"ILCE-7M4\" mode \"\"");
+        assert_eq!(
+            status,
+            DecodeStatus::UnsupportedCamera(
+                "Couldn't find camera \"SONY\" \"ILCE-7M4\" mode \"\"".to_string()
+            )
+        );
+        assert!(status.is_unsupported());
+    }
+
+    #[test]
+    fn classifier_recognizes_decoder_panic_and_unknown_format() {
+        assert_eq!(
+            classify_rawloader_error("Caught a panic while decoding"),
+            DecodeStatus::UnsupportedFormat("Caught a panic while decoding".to_string())
+        );
+        assert_eq!(
+            classify_rawloader_error("Don't know how to decode image"),
+            DecodeStatus::UnsupportedFormat("Don't know how to decode image".to_string())
+        );
+    }
+
+    #[test]
+    fn classifier_defaults_unknown_errors_to_generic() {
+        assert_eq!(
+            classify_rawloader_error("some io error"),
+            DecodeStatus::Error("some io error".to_string())
+        );
+    }
+
+    #[test]
+    fn probe_support_reports_unsupported_camera_for_newer_sony() {
+        let dir = std::env::var("RAW_DIR").unwrap_or_else(|_| "rawimage".to_string());
+        let path = Path::new(&dir).join("DSC00085.ARW");
+        if !path.exists() {
+            eprintln!("skipped: {} not present", path.display());
+            return;
+        }
+        let status = probe_support(&path);
+        assert!(
+            matches!(status, DecodeStatus::UnsupportedCamera(_)),
+            "expected UnsupportedCamera, got {status:?}"
+        );
+    }
 }

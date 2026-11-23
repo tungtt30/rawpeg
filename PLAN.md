@@ -177,8 +177,11 @@ RAW file
     11/2026 trên `rawimage/`: Canon 60D CR2, Nikon D750 NEF, Sony ILCE-6500 ARW decode OK;
     **fail** — Sony ILCE-7M4/7RM5 ARW (`Couldn't find camera` trong `check_supported`) và DNG
     Samsung Galaxy S25 (compression `0xffffcd42` → panic `ifds[0]` trong `dng.rs`, bị catch →
-    "Don't know how to decode"). Khi báo lỗi user đừng đổ lỗi pipeline; ghi rõ đây là giới hạn
-    library. M4 cần cân nhắc `rawler 0.8`/libraw để mở rộng hỗ trợ máy ảnh mới.
+    "Don't know how to decode"). **Guard đã thêm**: `decoder::probe_support(path)` probe nhẹ
+    (rawloader `decode_dummy`, không decode pixel) trả về `DecodeStatus::Supported |
+    UnsupportedCamera(reason) | UnsupportedFormat(reason) | Error(reason)` — UI import dùng để
+    báo rõ "camera chưa được hỗ trợ" thay vì lỗi chung chung, và `scan_directory` không phải
+    bỏ file. M4 cân nhắc `rawler 0.8`/libraw để mở rộng hỗ trợ máy ảnh mới.
 13. **Thêm `--max-dim` cho tool render preview:** full-res 9 ảnh ~1GB đĩa + ~2 phút; cap
     `--max-dim 2560` đủ soi chi tiết mà đĩa nhanh hơn nhiều.
 
