@@ -1,0 +1,22 @@
+[package]
+name = "rawpeg"
+version = "0.1.0"
+edition = "2024"
+description = "Raw to JPEG batch processor with a darkroom-style GUI"
+
+[dependencies]
+anyhow = "1"
+eframe = "0.37"
+egui = "0.37"
+egui_extras = "0.37"
+env_logger = "0.11"
+image = "0.25"
+imagepipe = "0.5.1"
+kamadak-exif = "0.6"
+log = "0.4"
+rayon = "1"
+rfd = "0.18"
+
+[profile.release]
+lto = "thin"
+strip = true
