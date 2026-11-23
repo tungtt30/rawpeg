@@ -34,6 +34,7 @@ impl eframe::App for RawpegApp {
         panels::top_bar(ui, state, worker);
         panels::library_panel(ui, state, worker);
         panels::adjustments_panel(ui, state, worker);
+        panels::status_bar(ui, state);
         panels::viewport(ui, state);
     }
 }

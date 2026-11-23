@@ -329,10 +329,15 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut AppState) {
             state.after.as_ref()
         };
         let Some(texture) = texture else {
+            let message = if state.current.is_some() && !state.status.is_empty() {
+                state.status.clone()
+            } else {
+                "Open a folder or add RAW files".to_string()
+            };
             painter.text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "Open a folder or add RAW files",
+                message,
                 FontId::proportional(16.0),
                 MUTED,
             );
@@ -371,6 +376,16 @@ pub fn viewport(ui: &mut egui::Ui, state: &mut AppState) {
             FontId::proportional(12.0),
             Color32::from_gray(170),
         );
+    });
+}
+
+pub fn status_bar(ui: &mut egui::Ui, state: &AppState) {
+    egui::Panel::bottom("status_bar").show(ui, |ui| {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&state.status).small().color(MUTED));
+        });
+        ui.add_space(2.0);
     });
 }
 
