@@ -36,9 +36,7 @@ pub fn auto_exposure(image: &DecodedImage) -> EditParams {
     let total = image.data.len() as u64;
 
     let median = percentile(&hist, total, 0.5);
-    params.exposure = (MID_GRAY / median.max(1e-6))
-        .log2()
-        .clamp(-3.0, 3.0);
+    params.exposure = (MID_GRAY / median.max(1e-6)).log2().clamp(-3.0, 3.0);
 
     let hi = percentile(&hist, total, 1.0 - CLIP_FRACTION);
     let hi_after = hi * 2f32.powf(params.exposure);

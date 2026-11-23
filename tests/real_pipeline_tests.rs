@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use rawpeg::models::EditParams;
 use rawpeg::raw_engine::auto_tone::auto_exposure;
 use rawpeg::raw_engine::decoder::{
-    decode_linear, decode_linear_scaled, decode_thumbnail_srgb, extract_exif_summary, probe_support,
-    scan_directory, DecodeStatus,
+    DecodeStatus, decode_linear, decode_linear_scaled, decode_thumbnail_srgb, extract_exif_summary,
+    probe_support, scan_directory,
 };
 use rawpeg::raw_engine::processor::{apply, apply_srgb, luminance};
 
@@ -48,18 +48,28 @@ fn check_full_pipeline(path: &Path) -> String {
     // Identity edits must be a no-op.
     let identity = apply(&decoded, &EditParams::default());
     assert_eq!(
-        identity, decoded.data,
+        identity,
+        decoded.data,
         "{}: neutral params not identity",
         path.display()
     );
 
     // Auto-tone produces in-range, deterministic parameters.
     let auto = auto_exposure(&decoded);
-    assert!(auto.is_auto_applied, "{}: auto not marked applied", path.display());
+    assert!(
+        auto.is_auto_applied,
+        "{}: auto not marked applied",
+        path.display()
+    );
     assert!((-3.0..=3.0).contains(&auto.exposure));
     assert!((-100..=100).contains(&auto.highlights));
     assert!((-100..=100).contains(&auto.shadows));
-    assert_eq!(auto, auto_exposure(&decoded), "{}: auto-tone not deterministic", path.display());
+    assert_eq!(
+        auto,
+        auto_exposure(&decoded),
+        "{}: auto-tone not deterministic",
+        path.display()
+    );
 
     // Edited buffer: same length, all finite.
     let edited = apply(&decoded, &auto);
@@ -97,8 +107,8 @@ fn check_full_pipeline(path: &Path) -> String {
     // EXIF must parse without error.
     extract_exif_summary(path).expect("exif parse");
 
-    let mean_lum = decoded.data.iter().map(|p| luminance(*p)).sum::<f32>()
-        / decoded.data.len().max(1) as f32;
+    let mean_lum =
+        decoded.data.iter().map(|p| luminance(*p)).sum::<f32>() / decoded.data.len().max(1) as f32;
     format!(
         "OK   {:28} {:5}x{:<5} ev={:+.2} hs={:+3} sh={:+3} mean_lum={:.3}",
         path.file_name().unwrap().to_string_lossy(),
@@ -121,7 +131,11 @@ fn check_full_pipeline(path: &Path) -> String {
 fn full_pipeline_on_real_samples() {
     let dir = sample_dir();
     let files = scan_directory(&dir).expect("scan sample directory");
-    assert!(!files.is_empty(), "no raw files found in '{}'", dir.display());
+    assert!(
+        !files.is_empty(),
+        "no raw files found in '{}'",
+        dir.display()
+    );
 
     let mut ok = 0usize;
     let mut unsupported = 0usize;
@@ -145,8 +159,14 @@ fn full_pipeline_on_real_samples() {
         println!("{line}");
         ok += 1;
     }
-    println!("\n{ok} passed, {unsupported} unsupported -> {}", dir.display());
-    assert!(ok > 0, "no sample decoded: {unsupported} unsupported, 0 passed");
+    println!(
+        "\n{ok} passed, {unsupported} unsupported -> {}",
+        dir.display()
+    );
+    assert!(
+        ok > 0,
+        "no sample decoded: {unsupported} unsupported, 0 passed"
+    );
 }
 
 /// Re-decoding the same file must produce byte-identical linear buffers and
@@ -164,11 +184,70 @@ fn pipeline_is_deterministic_on_real_samples() {
 
     let a = decode_linear(first).unwrap();
     let b = decode_linear(first).unwrap();
-    assert_eq!(a.data, b.data, "decode not deterministic: {}", first.display());
+    assert_eq!(
+        a.data,
+        b.data,
+        "decode not deterministic: {}",
+        first.display()
+    );
     assert_eq!(
         auto_exposure(&a),
         auto_exposure(&b),
         "auto-tone not deterministic: {}",
         first.display()
     );
+}
+
+/// Exports the first decodable real sample through the whole batch exporter.
+///
+/// Ignored by default because it needs real RAW files. Run with:
+/// `RAW_DIR=rawimage cargo test --test real_pipeline_tests -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn exporter_handles_real_sample() {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    use rawpeg::models::ExportSettings;
+    use rawpeg::raw_engine::exporter::{ExportJob, export_batch};
+
+    let dir = sample_dir();
+    let files = scan_directory(&dir).expect("scan sample directory");
+    let first = files
+        .iter()
+        .find(|path| decode_linear(path).is_ok())
+        .expect("no decodable sample in the directory");
+
+    let out = std::env::temp_dir().join(format!("rawpeg-real-export-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+
+    let settings = ExportSettings {
+        output_dir: Some(out.clone()),
+        max_dim: Some(1600),
+        ..Default::default()
+    };
+    let jobs = vec![ExportJob {
+        index: 0,
+        source: first.clone(),
+        output: settings.output_path(first),
+        params: EditParams::default(),
+    }];
+    let events = Mutex::new(Vec::new());
+    let summary = export_batch(&jobs, &settings, &AtomicBool::new(false), &|event| {
+        events.lock().unwrap().push(event);
+    });
+
+    assert_eq!(summary.succeeded, 1, "summary: {summary:?}");
+    assert!(jobs[0].output.exists());
+    let image = image::open(&jobs[0].output).expect("output is a valid image");
+    assert!(image.width().max(image.height()) <= 1600);
+    println!(
+        "OK   exported {} -> {} ({}x{})",
+        first.display(),
+        jobs[0].output.display(),
+        image.width(),
+        image.height()
+    );
+    let _ = std::fs::remove_dir_all(&out);
 }

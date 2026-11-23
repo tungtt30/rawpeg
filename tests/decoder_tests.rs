@@ -5,16 +5,12 @@ use std::path::PathBuf;
 
 use common::write_fixture_dng;
 use rawpeg::raw_engine::decoder::{
-    decode_linear, decode_linear_scaled, decode_thumbnail_srgb, extract_exif_summary,
-    is_raw_path, scan_directory,
+    decode_linear, decode_linear_scaled, decode_thumbnail_srgb, extract_exif_summary, is_raw_path,
+    scan_directory,
 };
 
 fn unique_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rawpeg-test-{}-{}",
-        std::process::id(),
-        name
-    ));
+    let dir = std::env::temp_dir().join(format!("rawpeg-test-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

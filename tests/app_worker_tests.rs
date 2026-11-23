@@ -5,18 +5,14 @@ use std::time::{Duration, Instant};
 
 use common::write_fixture_dng;
 use rawpeg::app::state::AppState;
-use rawpeg::app::worker::{Job, Message, Worker, PROXY_MAX_DIM, THUMB_MAX_DIM};
+use rawpeg::app::worker::{Job, Message, PROXY_MAX_DIM, THUMB_MAX_DIM, Worker};
 use rawpeg::models::EditParams;
 use rawpeg::raw_engine::decoder::DecodeStatus;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
 fn fixture_dng(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rawpeg-worker-{}-{}",
-        std::process::id(),
-        name
-    ));
+    let dir = std::env::temp_dir().join(format!("rawpeg-worker-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("fixture.dng");
@@ -125,28 +121,53 @@ fn auto_tone_job_returns_applied_parameters() {
 }
 
 #[test]
-fn thumbnail_job_probes_supported_fixture() {
+fn probe_job_reports_supported_fixture() {
+    let dng = fixture_dng("probe");
+    let worker = Worker::spawn(None);
+    worker.send(Job::Probe {
+        epoch: 0,
+        index: 3,
+        path: dng,
+    });
+
+    match worker.recv_timeout(TIMEOUT) {
+        Some(Message::Probed {
+            epoch,
+            index,
+            status,
+            exif,
+        }) => {
+            assert_eq!(epoch, 0);
+            assert_eq!(index, 3);
+            assert_eq!(status, DecodeStatus::Supported);
+            assert_eq!(exif.model.as_deref(), Some("FixtureCam"));
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
+}
+
+#[test]
+fn thumbnail_job_returns_texture() {
     let dng = fixture_dng("thumb");
     let worker = Worker::spawn(None);
     worker.send(Job::LoadThumbnail {
+        epoch: 0,
         index: 3,
         path: dng,
     });
 
     match worker.recv_timeout(TIMEOUT) {
         Some(Message::Thumbnail {
+            epoch,
             index,
             thumb,
-            status,
-            exif,
         }) => {
+            assert_eq!(epoch, 0);
             assert_eq!(index, 3);
-            assert_eq!(status, DecodeStatus::Supported);
             let thumb = thumb.expect("supported fixture should have a thumbnail");
             assert!(thumb.width as u32 <= THUMB_MAX_DIM);
             assert!(thumb.height as u32 <= THUMB_MAX_DIM);
             assert_eq!(thumb.rgb.len(), thumb.width * thumb.height * 3);
-            assert_eq!(exif.model.as_deref(), Some("FixtureCam"));
         }
         other => panic!("unexpected message: {other:?}"),
     }
@@ -192,4 +213,72 @@ fn state_poll_applies_proxy_and_auto_tone() {
         state.entries[0].item.params.is_auto_applied,
         "auto-tone parameters applied through poll"
     );
+}
+
+#[test]
+fn state_begin_export_writes_file_and_polls_progress() {
+    use rawpeg::models::ExportSettings;
+
+    let dng = fixture_dng("state-export");
+    let out = std::env::temp_dir().join(format!(
+        "rawpeg-state-export-{}-{}",
+        std::process::id(),
+        "out"
+    ));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+
+    let ctx = eframe::egui::Context::default();
+    let worker = Worker::spawn(None);
+    let mut state = AppState::default();
+    state.add_imported(&worker, vec![dng]);
+    state.export_settings = ExportSettings {
+        output_dir: Some(out.clone()),
+        ..Default::default()
+    };
+    state.begin_export(&worker);
+
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        state.poll(&ctx, &worker);
+        if state
+            .export
+            .as_ref()
+            .is_some_and(|session| session.finished)
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let session = state.export.as_ref().expect("export session");
+    assert!(session.finished, "export did not finish: {}", session.done);
+    let summary = session.summary.as_ref().expect("summary");
+    assert_eq!(summary.succeeded, 1, "summary: {summary:?}");
+    assert!(out.join("fixture.jpg").exists());
+    assert!(session.progress() >= 1.0);
+}
+
+#[test]
+fn proxy_failure_reports_token_and_index() {
+    let worker = Worker::spawn(None);
+    worker.send(Job::LoadProxy {
+        token: 42,
+        index: 7,
+        path: PathBuf::from("/definitely/missing-raw.dng"),
+        params: EditParams::default(),
+    });
+
+    match worker.recv_timeout(TIMEOUT) {
+        Some(Message::ProxyFailed {
+            token,
+            index,
+            message,
+        }) => {
+            assert_eq!(token, 42);
+            assert_eq!(index, 7);
+            assert!(message.contains("Failed to decode"), "{message}");
+        }
+        other => panic!("unexpected message: {other:?}"),
+    }
 }

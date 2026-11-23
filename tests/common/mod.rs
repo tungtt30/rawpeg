@@ -39,12 +39,24 @@ struct Entry {
 }
 
 fn inline(tag: u16, typ: u16, count: u32, value: u32) -> Entry {
-    Entry { tag, typ, count, value, blob: None }
+    Entry {
+        tag,
+        typ,
+        count,
+        value,
+        blob: None,
+    }
 }
 
 /// `count` is the number of TIFF values (not bytes); data is the raw value bytes.
 fn blob(tag: u16, typ: u16, count: u32, data: Vec<u8>) -> Entry {
-    Entry { tag, typ, count, value: 0, blob: Some(data) }
+    Entry {
+        tag,
+        typ,
+        count,
+        value: 0,
+        blob: Some(data),
+    }
 }
 
 fn align4(n: usize) -> usize {
@@ -103,19 +115,19 @@ pub fn write_fixture_dng(path: &Path) -> std::io::Result<()> {
 
     // IFD0 (main) entries. SubIFDs is patched once the raw IFD offset is known.
     let main_entries = vec![
-        blob(0x010f, 2, 5, b"TEST\0".to_vec()),       // Make
+        blob(0x010f, 2, 5, b"TEST\0".to_vec()),        // Make
         blob(0x0110, 2, 11, b"FixtureCam\0".to_vec()), // Model
-        inline(0xc612, 1, 4, 0x0000_0401),            // DNGVersion [1,4,0,0]
-        blob(0xc621, 10, 9, color_matrix),            // ColorMatrix1 = identity 3x3
-        blob(0xc628, 5, 3, neutral),                  // AsShotNeutral (1,1,1)
-        inline(0x014a, 13, 1, 0),                  // SubIFDs -> raw IFD (patched)
+        inline(0xc612, 1, 4, 0x0000_0401),             // DNGVersion [1,4,0,0]
+        blob(0xc621, 10, 9, color_matrix),             // ColorMatrix1 = identity 3x3
+        blob(0xc628, 5, 3, neutral),                   // AsShotNeutral (1,1,1)
+        inline(0x014a, 13, 1, 0),                      // SubIFDs -> raw IFD (patched)
     ];
 
     let strip_bytes = (WIDTH * HEIGHT * 2) as u32;
 
     // Raw IFD entries (strip offsets patched after layout is known).
     let raw_entries = vec![
-        inline(0x0100, 4, 1, WIDTH as u32), // ImageWidth
+        inline(0x0100, 4, 1, WIDTH as u32),  // ImageWidth
         inline(0x0101, 4, 1, HEIGHT as u32), // ImageLength
         inline(0x0102, 3, 1, 16),            // BitsPerSample
         inline(0x0103, 3, 1, 1),             // Compression = none

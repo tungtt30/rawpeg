@@ -9,11 +9,7 @@ use rawpeg::raw_engine::decoder::decode_linear;
 use rawpeg::raw_engine::processor::{apply, apply_srgb, encode_srgb, luminance};
 
 fn fixture_dng(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rawpeg-test-{}-{}",
-        std::process::id(),
-        name
-    ));
+    let dir = std::env::temp_dir().join(format!("rawpeg-test-{}-{}", std::process::id(), name));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("fixture.dng");

@@ -78,10 +78,7 @@ fn main() {
 }
 
 fn render_one(path: &Path, out: &Path, max_dim: usize) -> anyhow::Result<()> {
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("image");
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
     let model = extract_exif_summary(path)
         .ok()
         .and_then(|s| s.model)
@@ -93,18 +90,24 @@ fn render_one(path: &Path, out: &Path, max_dim: usize) -> anyhow::Result<()> {
 
     // Auto-tone variant.
     let auto = auto_exposure(&decoded);
-    let mean_lum = decoded
-        .data
-        .iter()
-        .map(|p| luminance(*p))
-        .sum::<f32>()
-        / decoded.data.len().max(1) as f32;
+    let mean_lum =
+        decoded.data.iter().map(|p| luminance(*p)).sum::<f32>() / decoded.data.len().max(1) as f32;
     let edited = apply(&decoded, &auto);
-    save_both(&out.join(format!("{name}__auto")), decoded.width, decoded.height, &edited)?;
+    save_both(
+        &out.join(format!("{name}__auto")),
+        decoded.width,
+        decoded.height,
+        &edited,
+    )?;
 
     // Neutral variant (identity edits).
     let neutral = apply(&decoded, &EditParams::default());
-    save_both(&out.join(format!("{name}__neutral")), decoded.width, decoded.height, &neutral)?;
+    save_both(
+        &out.join(format!("{name}__neutral")),
+        decoded.width,
+        decoded.height,
+        &neutral,
+    )?;
 
     // Reference variant: imagepipe 8-bit as-shot (base curve + gamma).
     let (w, h, data) = decode_thumbnail_srgb(path, max_dim as u32)?;

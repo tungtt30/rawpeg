@@ -118,8 +118,7 @@ fn encode_channel(c: f32) -> u8 {
     let c = if c <= SHOULDER_START {
         c
     } else {
-        SHOULDER_START
-            + SHOULDER_WIDTH * (1.0 - (-(c - SHOULDER_START) / SHOULDER_WIDTH).exp())
+        SHOULDER_START + SHOULDER_WIDTH * (1.0 - (-(c - SHOULDER_START) / SHOULDER_WIDTH).exp())
     };
     let srgb = if c <= SRGB_CUTOFF {
         12.92 * c
@@ -155,20 +154,47 @@ mod tests {
     #[test]
     fn exposure_doubles_and_halves_linear_values() {
         let image = img(vec![[0.25, 0.5, 0.75]]);
-        let plus = apply(&image, &EditParams { exposure: 1.0, ..neutral() });
+        let plus = apply(
+            &image,
+            &EditParams {
+                exposure: 1.0,
+                ..neutral()
+            },
+        );
         assert_eq!(plus[0], [0.5, 1.0, 1.5]);
-        let minus = apply(&image, &EditParams { exposure: -1.0, ..neutral() });
+        let minus = apply(
+            &image,
+            &EditParams {
+                exposure: -1.0,
+                ..neutral()
+            },
+        );
         assert_eq!(minus[0], [0.125, 0.25, 0.375]);
     }
 
     #[test]
     fn contrast_spreads_values_around_mid_gray() {
         let image = img(vec![[0.05, 0.18, 0.5]]);
-        let high = apply(&image, &EditParams { contrast: 50, ..neutral() });
+        let high = apply(
+            &image,
+            &EditParams {
+                contrast: 50,
+                ..neutral()
+            },
+        );
         assert!(high[0][0] < 0.05, "darks get darker");
-        assert!((high[0][1] - 0.18).abs() < 1e-6, "mid-gray is a fixed point");
+        assert!(
+            (high[0][1] - 0.18).abs() < 1e-6,
+            "mid-gray is a fixed point"
+        );
         assert!(high[0][2] > 0.5, "brights get brighter");
-        let low = apply(&image, &EditParams { contrast: -50, ..neutral() });
+        let low = apply(
+            &image,
+            &EditParams {
+                contrast: -50,
+                ..neutral()
+            },
+        );
         assert!(low[0][0] > 0.05, "darks get lighter");
         assert!(low[0][2] < 0.5, "brights get darker");
     }
@@ -176,10 +202,22 @@ mod tests {
     #[test]
     fn highlights_and_shadows_only_touch_their_masked_region() {
         let image = img(vec![[0.02, 0.02, 0.02], [0.9, 0.9, 0.9]]);
-        let lifted = apply(&image, &EditParams { shadows: 100, ..neutral() });
+        let lifted = apply(
+            &image,
+            &EditParams {
+                shadows: 100,
+                ..neutral()
+            },
+        );
         assert!(lifted[0][0] > 0.02, "shadows lifted");
         assert_eq!(lifted[1], [0.9, 0.9, 0.9], "highlights untouched");
-        let compressed = apply(&image, &EditParams { highlights: 100, ..neutral() });
+        let compressed = apply(
+            &image,
+            &EditParams {
+                highlights: 100,
+                ..neutral()
+            },
+        );
         assert_eq!(compressed[0], [0.02, 0.02, 0.02], "shadows untouched");
         assert!(compressed[1][0] < 0.9, "highlights compressed");
     }
@@ -187,20 +225,56 @@ mod tests {
     #[test]
     fn highlights_and_shadows_are_symmetric_for_negative_values() {
         let image = img(vec![[0.02, 0.02, 0.02], [0.9, 0.9, 0.9]]);
-        let dark = apply(&image, &EditParams { shadows: -100, ..neutral() });
+        let dark = apply(
+            &image,
+            &EditParams {
+                shadows: -100,
+                ..neutral()
+            },
+        );
         assert_eq!(dark[0], [0.0, 0.0, 0.0], "negative shadows crush to zero");
-        let bright = apply(&image, &EditParams { highlights: -100, ..neutral() });
+        let bright = apply(
+            &image,
+            &EditParams {
+                highlights: -100,
+                ..neutral()
+            },
+        );
         assert!(bright[1][0] > 0.9, "negative highlights brighten");
     }
 
     #[test]
     fn white_balance_direction_follows_temperature_and_tint() {
         let image = img(vec![[0.5, 0.5, 0.5]]);
-        let warm = apply(&image, &EditParams { temperature: 10000, ..neutral() });
-        assert!(warm[0][0] > 0.5 && warm[0][2] < 0.5, "warm: red up, blue down");
-        let cool = apply(&image, &EditParams { temperature: 2000, ..neutral() });
-        assert!(cool[0][2] > 0.5 && cool[0][0] < 0.5, "cool: blue up, red down");
-        let magenta = apply(&image, &EditParams { tint: 100, ..neutral() });
+        let warm = apply(
+            &image,
+            &EditParams {
+                temperature: 10000,
+                ..neutral()
+            },
+        );
+        assert!(
+            warm[0][0] > 0.5 && warm[0][2] < 0.5,
+            "warm: red up, blue down"
+        );
+        let cool = apply(
+            &image,
+            &EditParams {
+                temperature: 2000,
+                ..neutral()
+            },
+        );
+        assert!(
+            cool[0][2] > 0.5 && cool[0][0] < 0.5,
+            "cool: blue up, red down"
+        );
+        let magenta = apply(
+            &image,
+            &EditParams {
+                tint: 100,
+                ..neutral()
+            },
+        );
         assert!(
             magenta[0][0] > 0.5 && magenta[0][1] < 0.5,
             "positive tint: magenta shift"
@@ -242,7 +316,13 @@ mod tests {
     #[test]
     fn apply_srgb_outputs_valid_bytes() {
         let image = img(vec![[0.0, 0.18, 1.0], [2.0, 0.5, 0.01]]);
-        let out = apply_srgb(&image, &EditParams { exposure: 0.5, ..neutral() });
+        let out = apply_srgb(
+            &image,
+            &EditParams {
+                exposure: 0.5,
+                ..neutral()
+            },
+        );
         assert_eq!(out.len(), 6);
     }
 }

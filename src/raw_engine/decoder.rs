@@ -1,16 +1,16 @@
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
-use imagepipe::Pipeline;
+use anyhow::{Context, Result, anyhow};
 use exif::{In, Reader, Tag, Value};
+use imagepipe::Pipeline;
 
 use crate::models::ExifSummary;
 
 /// File extensions accepted by the raw engine (case-insensitive).
 pub const RAW_EXTENSIONS: &[&str] = &[
-    "3fr", "ari", "arw", "cr2", "cr3", "dcr", "dng", "erf", "iiq", "kdc", "mef", "mos",
-    "mrw", "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "srw", "x3f",
+    "3fr", "ari", "arw", "cr2", "cr3", "dcr", "dng", "erf", "iiq", "kdc", "mef", "mos", "mrw",
+    "nef", "nrw", "orf", "pef", "raf", "raw", "rw2", "srw", "x3f",
 ];
 
 /// A decoded image stored as linear RGB.
@@ -198,7 +198,8 @@ mod tests {
 
     #[test]
     fn classifier_recognizes_unsupported_camera() {
-        let status = classify_rawloader_error("Couldn't find camera \"SONY\" \"ILCE-7M4\" mode \"\"");
+        let status =
+            classify_rawloader_error("Couldn't find camera \"SONY\" \"ILCE-7M4\" mode \"\"");
         assert_eq!(
             status,
             DecodeStatus::UnsupportedCamera(
