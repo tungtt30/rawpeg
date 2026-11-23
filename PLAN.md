@@ -36,7 +36,11 @@ rawpeg/
 ├── src/
 │   ├── lib.rs                     # pub mod app / models / raw_engine
 │   ├── main.rs                    # eframe entry (windows_subsystem cho release)
-│   ├── app.rs                     # ★ M3: state + UI egui (hiện chỉ window trống)
+│   ├── app/                       # ✅ M3 XONG: darkroom UI
+│   │   ├── mod.rs                 # RawpegApp + eframe::App::ui + dark theme
+│   │   ├── state.rs               # AppState: library, viewport, clipboard, histogram
+│   │   ├── worker.rs              # thread + mpsc + job coalescing (không block UI)
+│   │   └── panels.rs              # top bar / library / viewport / adjustments
 │   ├── raw_engine/
 │   │   ├── decoder.rs             # ✅ M1 XONG
 │   │   ├── processor.rs           # ✅ M2 XONG
@@ -49,6 +53,7 @@ rawpeg/
     ├── common/mod.rs              # fixture DNG 12x12 RGGB tự sinh (TIFF writer)
     ├── decoder_tests.rs           # ✅ 8 tests + 1 ignored (RAW thật)
     ├── processor_tests.rs         # ✅ 6 tests (apply/encode_srgb/auto_tone trên fixture)
+    ├── app_worker_tests.rs        # ✅ M3: 5 tests worker jobs + headless AppState::poll
     └── real_pipeline_tests.rs     # ✅ ignored: full pipeline trên RAW thật (RAW_DIR, mặc định ./rawimage)
 ```
 
@@ -115,10 +120,31 @@ RAW file
 4. Tests: 17 unit (processor 12 + auto_tone 5) + 6 integration trên fixture DNG.
 - **Gate đã qua:** `cargo check`, `cargo test` (31 tests), `cargo clippy --all-targets` (0 warning), `cargo build` debug.
 
-### ⏳ Milestone 3 — Darkroom UI (egui)
-- Thread worker + `mpsc`/`rayon`; không block UI thread.
-- Theme dark (#18181B / #27272A / #3B82F6), 3 cột + top bar.
-- Thumbnails trái (badge đã chỉnh/chưa), center zoom/pan + Before/After, right sliders + histogram.
+### ✅ Milestone 3 — Darkroom UI (XONG, branch `milestone-3`)
+1. **Worker thread** (`app/worker.rs`): `std::sync::mpsc`, `Job` → `Message`; UI poll
+   `try_recv` mỗi frame, worker gọi `ctx.request_repaint()` sau mỗi kết quả.
+   - `Job`: ScanDir · LoadThumbnail · LoadProxy · RenderAfter · AutoTone.
+   - **Coalescing**: mỗi vòng lặp drain channel; chỉ giữ `LoadProxy`/`AutoTone`/
+     `RenderAfter` **mới nhất**, thumbnails giữ hết theo thứ tự; proxy luôn chạy trước render.
+   - Proxy linear ~1600px giữ trong worker (UI không giữ bản sao); `RenderAfter` tái dùng nó.
+   - **Proxy token**: tăng mỗi lần chọn ảnh; message cũ bị bỏ (chống race khi đổi ảnh nhanh).
+2. **State** (`app/state.rs`): library (`LibraryEntry` = ImageItem + probe status + thumbnail
+   texture), viewport (zoom/pan), clipboard params, `RgbHistogram` 3×256 bins từ buffer linear
+   sau apply. `poll()` áp message → tạo/cập nhật texture bằng `ctx.load_texture`/`TextureHandle::set`.
+3. **UI** (`app/panels.rs`, theme trong `app/mod.rs`):
+   - Top bar: Open Folder (`rfd`) → ScanDir; Add Files → thêm trực tiếp; EXIF của ảnh chọn;
+     Export Batch disabled (M4).
+   - Library trái: thumbnail + checkbox batch + badge `edited/original`; file unsupported hiện
+     lý do từ `DecodeStatus` (guard M2).
+   - Viewport giữa: fit-to-view, zoom bằng scroll wheel (0.1×–16×), pan bằng drag,
+     double-click reset; **giữ Space = Before**, thả = After; overlay % và nhãn BEFORE.
+   - Adjustments phải: sliders Exposure/Contrast/Highlights/Shadows/Temp/Tint; Auto Balance,
+     Reset, Copy/Paste settings; histogram RGB live.
+4. Tests: 12 unit trong `app` (state 8 + worker 4: coalescing/token/badge/paste) +
+   5 integration `tests/app_worker_tests.rs` (worker jobs + `AppState::poll` headless trên fixture).
+- **Gate đã qua:** `./scripts/verify_local.sh` ALL GREEN (`cargo check`, `cargo test` 33 lib +
+  19 integration, `cargo clippy --all-targets` 0 warning, `cargo build`), smoke test `cargo run`
+  mở cửa sổ không panic.
 
 ### ⏳ Milestone 4 — Batch Exporter
 - `exporter.rs` với rayon; decode full → edit → sRGB → `jpeg-encoder` (quality 98, 4:4:4) → ghi EXIF/ICC.
@@ -184,13 +210,33 @@ RAW file
     bỏ file. M4 cân nhắc `rawler 0.8`/libraw để mở rộng hỗ trợ máy ảnh mới.
 13. **Thêm `--max-dim` cho tool render preview:** full-res 9 ảnh ~1GB đĩa + ~2 phút; cap
     `--max-dim 2560` đủ soi chi tiết mà đĩa nhanh hơn nhiều.
+14. **Coalescing job trong worker (M3):** kéo slider sinh ra `RenderAfter` mỗi frame; worker
+    drain channel rồi chỉ giữ **request mới nhất** cho `LoadProxy`/`AutoTone`/`RenderAfter`
+    (thumbnails giữ hết, theo thứ tự). Nếu không coalesce, hàng đợi phình và ảnh hiển thị trễ.
+    Proxy load phải chạy **trước** render trong cùng batch để render áp lên ảnh mới.
+15. **Proxy token chống race:** mỗi lần select tăng `proxy_token`; `ProxyReady`/`RenderReady`/
+    `AutoToneReady` mang token, UI bỏ message lệch token. Không có nó, chuyển ảnh nhanh sẽ render
+    kết quả của ảnh cũ đè lên ảnh mới.
+16. **Texture upload egui 0.37:** `ctx.load_texture` để tạo, `TextureHandle::set` để cập nhật tại
+    chỗ. Proxy ~1600px upload mỗi tick slider vẫn mượt; không cần tạo texture mới mỗi frame
+    (rò rỉ texture manager nếu tạo liên tục).
+17. **Panels egui 0.37:** `egui::Panel::{top,left,right}(id).show(ui, ...)` (không còn
+    `SidePanel`/`TopBottomPanel`), `CentralPanel::default().show(ui, ...)`; `App::ui` nhận `&mut Ui`
+    gốc — panel thêm theo thứ tự, CentralPanel cuối cùng.
+18. **Test UI headless:** `eframe::egui::Context::default()` có `max_texture_side = 2048`, đủ để
+    gọi `AppState::poll` (load texture) trong integration test mà không cần mở cửa sổ — dùng
+    sleep-poll có deadline, không flaky.
+19. **Before/After = giữ Space** (đã chốt thay cho "giữ chuột" trong spec gốc) để chuột trái
+    rảnh cho pan; zoom bằng scroll wheel, double-click reset viewport.
 
 ## 8. Command thường dùng
 ```bash
 cargo check                    # gate biên dịch
 cargo test                     # unit + integration
 cargo clippy --all-targets     # 0 warning bắt buộc
-cargo run                      # chạy GUI
+./scripts/verify_local.sh      # gate 4 bước (check/test/clippy/build)
+cargo run                      # chạy GUI darkroom
+cargo test --test app_worker_tests   # worker jobs + AppState::poll headless
 ./scripts/fetch_samples.sh [dir]
 RAW_SAMPLE=dir/canon_6d.cr2 cargo test --test decoder_tests decode_real_sample -- --ignored
 RAW_DIR=rawimage cargo test --test real_pipeline_tests -- --ignored --nocapture
