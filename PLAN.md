@@ -115,6 +115,10 @@ CR2/CR3/NEF/ARW/RAF/ORF/RW2/DNG (+ srw/pef/kdc/erf/... danh sách trong `RAW_EXT
 ### UI/UX batch-first (M3-R)
 - **Library mode mặc định**: grid ảnh full-width, tick chọn hàng loạt, filter
   `All / Selected / Edited / Issues`, `Select all` tri-state, `Clear`.
+- **Selection helpers**: `Select supported` (chọn supported + pending, bỏ
+  unsupported/error) và `Deselect unsupported` (giữ selection hiện tại, chỉ bỏ
+  unsupported/error) hiển thị ở bulk bar khi library có file unsupported; áp dụng
+  toàn library, không phụ thuộc filter.
 - **Top bar**: `Open Folder`, `Add Files`, `Library | Develop`, `Export N ▾`
   (mở Export panel / `Quick export`), EXIF ảnh hiện tại, nút `?` help.
 - **Bulk actions**: `Sync current to N`, `Reset selected` (có confirm), `Export N`.
@@ -335,11 +339,15 @@ nguyên; `is_auto_applied = true`.
     icon trong `.exe` (Explorer) vẫn phải nhúng riêng bằng `embed-resource`.
 46. **App chưa ký:** macOS Gatekeeper (“unidentified developer”) và Windows
     SmartScreen sẽ cảnh báo; signing/notarization là follow-up ngoài M5.
+47. **Select supported:** pending (`status = None`) được coi là “chưa biết
+    unsupported” nên vẫn được chọn; `DecodeStatus::Error` cũng bị coi là unsupported.
+    Nếu probe sau đó đánh dấu unsupported, selection không tự đổi — exporter vẫn skip;
+    người dùng bấm `Deselect unsupported` để dọn.
 
 ## 8. Command thường dùng
 ```bash
 cargo check                    # gate biên dịch
-cargo test                     # 91 passed, 4 ignored
+cargo test                     # 94 passed, 4 ignored
 cargo clippy --all-targets -- -D warnings
 cargo build                    # debug
 ./scripts/verify_local.sh      # gate 4 bước đầy đủ
@@ -347,7 +355,7 @@ cargo run                      # chạy GUI batch-first
 
 cargo test --test exporter_tests        # 11 test export
 cargo test --test app_worker_tests      # 8 test worker/state
-cargo test --test ui_smoke_tests        # 2 test render headless
+cargo test --test ui_smoke_tests        # 3 test render headless
 cargo test --test assets_tests          # 5 test icon/plist (M5)
 
 # Icon assets (macOS; output đã commit, chỉ chạy khi đổi icon):

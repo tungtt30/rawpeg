@@ -1051,6 +1051,60 @@ mod tests {
     }
 
     #[test]
+    fn select_supported_selects_pending_and_clears_unsupported() {
+        let mut state = state_with(&["a.dng", "b.dng", "c.dng", "d.dng", "e.dng"]);
+        state.set_probed(0, DecodeStatus::Supported, ExifSummary::default());
+        state.set_probed(
+            1,
+            DecodeStatus::UnsupportedCamera("old table".into()),
+            ExifSummary::default(),
+        );
+        state.set_probed(
+            2,
+            DecodeStatus::UnsupportedFormat("bad".into()),
+            ExifSummary::default(),
+        );
+        state.set_probed(3, DecodeStatus::Error("io".into()), ExifSummary::default());
+        state.set_all_selected(true);
+
+        state.select_supported();
+
+        assert!(state.entries[0].item.selected);
+        assert!(!state.entries[1].item.selected);
+        assert!(!state.entries[2].item.selected);
+        assert!(!state.entries[3].item.selected);
+        assert!(state.entries[4].item.selected);
+
+        let stats = state.selection_stats();
+        assert_eq!(stats.selected, 2);
+        assert_eq!(stats.selected_supported, 1);
+        assert_eq!(stats.selected_pending, 1);
+        assert_eq!(stats.selected_unsupported, 0);
+    }
+
+    #[test]
+    fn deselect_unsupported_keeps_supported_and_pending_selected() {
+        let mut state = state_with(&["a.dng", "b.dng", "c.dng", "d.dng"]);
+        state.set_probed(0, DecodeStatus::Supported, ExifSummary::default());
+        state.set_probed(
+            1,
+            DecodeStatus::UnsupportedCamera("old table".into()),
+            ExifSummary::default(),
+        );
+        state.set_probed(2, DecodeStatus::Error("io".into()), ExifSummary::default());
+        for entry in &mut state.entries {
+            entry.item.selected = true;
+        }
+
+        state.deselect_unsupported();
+
+        assert!(state.entries[0].item.selected);
+        assert!(!state.entries[1].item.selected);
+        assert!(!state.entries[2].item.selected);
+        assert!(state.entries[3].item.selected);
+    }
+
+    #[test]
     fn visible_indices_follow_filter() {
         let mut state = state_with(&["a.dng", "b.dng", "c.dng"]);
         state.entries[0].item.selected = false;

@@ -107,15 +107,42 @@ pub fn central(ui: &mut egui::Ui, state: &mut AppState, worker: &Worker) {
             }
         });
     });
-    if stats.selected_unsupported > 0 {
-        ui.label(
-            RichText::new(format!(
-                "{} selected unsupported file(s) will be skipped",
-                stats.selected_unsupported
-            ))
-            .small()
-            .color(DANGER),
-        );
+    if stats.unsupported > 0 {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .small_button("Select supported")
+                .on_hover_text(
+                    "Selects supported and still-checking RAW files; unchecks unsupported or \
+                     failed files. Applies to the whole library.",
+                )
+                .clicked()
+            {
+                state.select_supported();
+            }
+            if ui
+                .add_enabled(
+                    stats.selected_unsupported > 0,
+                    egui::Button::new("Deselect unsupported").small(),
+                )
+                .on_hover_text(
+                    "Keeps the current selection; unchecks unsupported/failed files. Applies to \
+                     the whole library.",
+                )
+                .clicked()
+            {
+                state.deselect_unsupported();
+            }
+            if stats.selected_unsupported > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "{} selected unsupported file(s) will be skipped",
+                        stats.selected_unsupported
+                    ))
+                    .small()
+                    .color(DANGER),
+                );
+            }
+        });
     }
     ui.separator();
 

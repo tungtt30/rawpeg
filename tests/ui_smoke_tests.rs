@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use eframe::egui;
 use rawpeg::app::RawpegApp;
 use rawpeg::app::state::{AppState, ViewMode};
+use rawpeg::models::ExifSummary;
+use rawpeg::raw_engine::decoder::DecodeStatus;
 
 use rawpeg::app::worker::Worker;
 
@@ -37,6 +39,23 @@ fn app_renders_library_and_develop_headless() {
     let mut state = AppState::default();
     state.add_imported(&worker, vec![dng]);
     state.view_mode = ViewMode::Develop;
+    let mut app = RawpegApp::from_parts(state, worker);
+    headless_frames(&mut app, &ctx, 5);
+}
+
+#[test]
+fn app_renders_selection_actions_with_unsupported_headless() {
+    let ctx = egui::Context::default();
+    let worker = Worker::spawn(None);
+    let mut state = AppState::default();
+    state.add_paths([PathBuf::from("/tmp/a.dng"), PathBuf::from("/tmp/b.dng")]);
+    state.set_probed(0, DecodeStatus::Supported, ExifSummary::default());
+    state.set_probed(
+        1,
+        DecodeStatus::UnsupportedCamera("test".into()),
+        ExifSummary::default(),
+    );
+    state.entries[1].item.selected = true;
     let mut app = RawpegApp::from_parts(state, worker);
     headless_frames(&mut app, &ctx, 5);
 }
