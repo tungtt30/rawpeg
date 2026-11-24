@@ -18,6 +18,11 @@ const SHOULDER_START: f32 = 0.8;
 const SHOULDER_WIDTH: f32 = 0.2;
 /// Mid-gray anchor for the contrast S-curve.
 const MID_GRAY: f32 = 0.18;
+/// Below this pixel count the row-parallel path is not worth the rayon overhead.
+const PARALLEL_MIN_PIXELS: usize = 16_384;
+/// Pixels per rayon work unit. Large enough to amortize scheduling, small
+/// enough to balance work across cores.
+const PARALLEL_CHUNK_PIXELS: usize = 16_384;
 
 /// Linear luminance (Rec. 709 weights) of one pixel.
 pub fn luminance(pixel: [f32; 3]) -> f32 {
@@ -42,8 +47,56 @@ pub fn apply(image: &DecodedImage, params: &EditParams) -> Vec<[f32; 3]> {
 
 /// Applies the edit chain and encodes the result to sRGB 8-bit.
 pub fn apply_srgb(image: &DecodedImage, params: &EditParams) -> Vec<u8> {
-    let edited = apply(image, params);
-    encode_srgb(&edited)
+    let mut out = vec![0u8; image.data.len() * 3];
+    apply_srgb_into(image, params, &mut out);
+    out
+}
+
+/// Applies the edit chain and writes sRGB 8-bit bytes into `out`, without
+/// allocating a full edited linear buffer.
+///
+/// `out.len()` must be exactly `image.data.len() * 3`. Rows are processed in
+/// parallel in fixed-size chunks, which keeps peak memory close to the decoded
+/// image plus the final 8-bit output.
+pub fn apply_srgb_into(image: &DecodedImage, params: &EditParams, out: &mut [u8]) {
+    assert_eq!(
+        out.len(),
+        image.data.len() * 3,
+        "sRGB output buffer has the wrong length"
+    );
+    let wb = white_balance_gains(params);
+    let ev = params.exposure;
+    let highlights = params.highlights;
+    let shadows = params.shadows;
+    let gamma = 1.0 + params.contrast as f32 * 0.01;
+
+    if image.data.len() >= PARALLEL_MIN_PIXELS {
+        out.par_chunks_mut(PARALLEL_CHUNK_PIXELS * 3)
+            .zip(image.data.par_chunks(PARALLEL_CHUNK_PIXELS))
+            .for_each(|(dst, src)| {
+                edit_and_encode_chunk(dst, src, wb, ev, highlights, shadows, gamma)
+            });
+    } else {
+        edit_and_encode_chunk(out, &image.data, wb, ev, highlights, shadows, gamma);
+    }
+}
+
+fn edit_and_encode_chunk(
+    out: &mut [u8],
+    src: &[[f32; 3]],
+    wb: [f32; 3],
+    ev: f32,
+    highlights: i32,
+    shadows: i32,
+    gamma: f32,
+) {
+    debug_assert_eq!(out.len(), src.len() * 3);
+    for (dst, pixel) in out.chunks_exact_mut(3).zip(src) {
+        let edited = edit_pixel(*pixel, wb, ev, highlights, shadows, gamma);
+        dst[0] = encode_channel(edited[0]);
+        dst[1] = encode_channel(edited[1]);
+        dst[2] = encode_channel(edited[2]);
+    }
 }
 
 /// Encodes a linear `0.0..=` buffer to sRGB 8-bit.
@@ -52,10 +105,22 @@ pub fn apply_srgb(image: &DecodedImage, params: &EditParams) -> Vec<u8> {
 /// (C1-continuous, asymptotic to `1.0`) so over-exposed highlights roll off
 /// gradually instead of clipping at a hard threshold.
 pub fn encode_srgb(data: &[[f32; 3]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() * 3);
-    for pixel in data {
-        for channel in pixel {
-            out.push(encode_channel(*channel));
+    let mut out = vec![0u8; data.len() * 3];
+    if data.len() >= PARALLEL_MIN_PIXELS {
+        out.par_chunks_mut(PARALLEL_CHUNK_PIXELS * 3)
+            .zip(data.par_chunks(PARALLEL_CHUNK_PIXELS))
+            .for_each(|(dst, src)| {
+                for (dst, pixel) in dst.chunks_exact_mut(3).zip(src) {
+                    dst[0] = encode_channel(pixel[0]);
+                    dst[1] = encode_channel(pixel[1]);
+                    dst[2] = encode_channel(pixel[2]);
+                }
+            });
+    } else {
+        for (dst, pixel) in out.chunks_exact_mut(3).zip(data) {
+            dst[0] = encode_channel(pixel[0]);
+            dst[1] = encode_channel(pixel[1]);
+            dst[2] = encode_channel(pixel[2]);
         }
     }
     out
@@ -324,5 +389,50 @@ mod tests {
             },
         );
         assert_eq!(out.len(), 6);
+    }
+
+    #[test]
+    fn chunked_apply_matches_apply_then_encode_on_large_buffer() {
+        let width = 200;
+        let height = 200;
+        let mut data = Vec::with_capacity(width * height);
+        for y in 0..height {
+            for x in 0..width {
+                let r = (x as f32 / width as f32) * 1.5;
+                let g = (y as f32 / height as f32) * 0.8;
+                let b = ((x + y) as f32 / (width + height) as f32) * 2.0;
+                data.push([r, g, b]);
+            }
+        }
+        let image = DecodedImage {
+            width,
+            height,
+            data,
+        };
+        let params = EditParams {
+            exposure: 0.4,
+            contrast: 25,
+            highlights: -15,
+            shadows: 10,
+            temperature: 7200,
+            tint: -5,
+            ..neutral()
+        };
+
+        let expected = encode_srgb(&apply(&image, &params));
+        let mut actual = vec![0u8; image.data.len() * 3];
+        apply_srgb_into(&image, &params, &mut actual);
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual, apply_srgb(&image, &params));
+        assert!(actual.len() >= PARALLEL_MIN_PIXELS * 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong length")]
+    fn apply_srgb_into_rejects_wrong_buffer_size() {
+        let image = img(vec![[0.1, 0.2, 0.3]]);
+        let mut out = vec![0u8; 2];
+        apply_srgb_into(&image, &neutral(), &mut out);
     }
 }

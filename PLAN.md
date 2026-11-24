@@ -55,23 +55,24 @@ rawpeg/
 │   │       ├── status.rs              # bottom status bar + export progress
 │   │       └── widgets.rs             # colors, buttons, badges, histogram, EXIF format
 │   ├── raw_engine/
-│   │   ├── decoder.rs                 # ✅ M1
-│   │   ├── processor.rs               # ✅ M2
+│   │   ├── decoder.rs                 # ✅ M1/M6: linear f32 decode trực tiếp từ imagepipe
+│   │   ├── processor.rs               # ✅ M2/M6: edit chain + chunked sRGB (rayon)
 │   │   ├── auto_tone.rs               # ✅ M2
-│   │   └── exporter.rs                # ✅ M4: decode full/proxy → apply → sRGB → JPEG/PNG/TIFF + EXIF
+│   │   └── exporter.rs                # ✅ M4/M6: bounded concurrency + rayon pool
 │   └── models/
 │       ├── edit_params.rs             # ✅ M1
 │       ├── export_settings.rs         # ✅ M4: ExportFormat + ExportSettings
+│       ├── performance.rs             # ✅ M6: CPU threads + parallel photos
 │       └── image_item.rs              # ✅ M1
 └── tests/
     ├── common/mod.rs                  # fixture DNG 12x12 RGGB tự sinh
     ├── decoder_tests.rs               # ✅ 8 tests + 1 ignored (RAW thật)
     ├── processor_tests.rs             # ✅ 6 tests
     ├── app_worker_tests.rs            # ✅ 8 tests: probe/thumbnails/proxy/auto-tone/state export/proxy failure
-    ├── exporter_tests.rs              # ✅ 11 tests: JPEG/PNG/TIFF, EXIF, resize, skip, cancel, lỗi, duplicate output
-    ├── ui_smoke_tests.rs              # ✅ 2 tests: render headless empty + Library/Develop
+    ├── exporter_tests.rs              # ✅ 13 tests: formats, EXIF, resize, skip, cancel, lỗi, duplicate, thread parity
+    ├── ui_smoke_tests.rs              # ✅ 4 tests: render headless empty + Library/Develop + Export panel
     ├── assets_tests.rs                 # ✅ 5 tests M5: PNG/ICO/ICNS, rc + Info.plist
-    └── real_pipeline_tests.rs          # ✅ ignored: full pipeline + exporter trên RAW thật
+    └── real_pipeline_tests.rs          # ✅ ignored: full pipeline + exporter + benchmark trên RAW thật
 ```
 
 Ngoài ra (công cụ dev, không nằm trong `cargo test` gate):
@@ -85,14 +86,14 @@ examples/render_previews.rs      # render PNG+JPEG full-res để soi bằng m�
 RAW file
  └─ imagepipe::Pipeline::new_from_file(path)
      ├─ maxwidth/maxheight = giới hạn cạnh dài (0 = full-res)
-     ├─ output_16bit(None) → SRGBImage16 (KHÔNG gamma khi settings.linear=true
-     │     → data LINEAR f32 scale 0..65535) ─── DÙNG CHO CHỈNH SỬA / EXPORT
-     └─ output_8bit(None)  → sRGB u8 ─────────── DÙNG CHO THUMBNAIL
+     ├─ settings.linear = true; run(None) → OpBuffer f32 RGBA
+     │     → chuyển song song RGBA→RGB, clamp 0..=1 ─── CHỈNH SỬA / EXPORT
+     └─ output_8bit(None)  → sRGB u8 ─────────────────── DÙNG CHO THUMBNAIL
 ```
 
 - **Import:** `scan_directory` → `Probe` từng file (metadata-only) → status + EXIF;
   thumbnail chỉ decode khi file lọt vào vùng nhìn thấy (lazy, tránh decode 1000 ảnh).
-- **Buffer chỉnh sửa:** `Vec<[f32;3]>` linear, chuẩn hóa `0.0..=1.0` (`/65535.0`).
+- **Buffer chỉnh sửa:** `Vec<[f32;3]>` linear, chuẩn hóa `0.0..=1.0`.
   Mọi phép toán (Exposure, Contrast, Highlights/Shadows, WB) chạy trong không gian
   linear; chỉ sRGB-encode ở bước cuối.
 - **Base tone curve** của imagepipe bị tắt khi decode linear
@@ -100,12 +101,15 @@ RAW file
 - **Proxy image:** decode full-res 1 lần khi mở Develop → downscale ~1600px cho slider
   real-time; click trong Library chỉ set current, không decode proxy.
 - **Render:** `RenderAfter` tái dùng proxy trong worker; coalescing chỉ giữ request mới nhất.
-- **Export:** snapshot selection → jobs → `decode_linear_scaled(max_dim)` → `apply` →
-  `encode_srgb` → JPEG/PNG/TIFF → EXIF → ghi file tạm → rename. File lỗi không dừng batch.
+- **Export:** snapshot selection → jobs → `decode_linear_scaled(max_dim)` (linear f32
+  trực tiếp) → `apply_srgb_into` (edit + sRGB theo chunk, rayon) → JPEG/PNG/TIFF →
+  EXIF → ghi file tạm → rename. File lỗi không dừng batch.
 - **EXIF:** đọc `ExifSummary` để hiện UI; block EXIF nhỏ được dựng lại bằng
   `exif::experimental::Writer`, chuẩn hoá `Orientation = 1` và cập nhật pixel dimensions.
 - **Threading:** worker thread xử lý scan/probe/thumbnail/proxy/render; export chạy
-  thread riêng với progress `mpsc`; cancel bằng `Arc<AtomicBool>`.
+  thread riêng với progress `mpsc`; cancel bằng `Arc<AtomicBool>`. Export dùng rayon
+  pool `PerformanceSettings::resolved_threads()` và tối đa
+  `resolved_concurrency()` ảnh cùng lúc (mặc định 2 full-res / 4 resize).
 
 ## 4. Tính năng (theo spec)
 
@@ -129,8 +133,9 @@ CR2/CR3/NEF/ARW/RAF/ORF/RW2/DNG (+ srw/pef/kdc/erf/... danh sách trong `RAW_EXT
 - **Library inspector trái**: filmstrip + checkbox + badge `edited/original/unsupported`,
   filter, lazy thumbnail, tooltip lý do unsupported.
 - **Export panel**: destination (same source/custom), format JPEG/PNG/TIFF,
-  quality 98/4:4:4, long-edge resize, preserve EXIF, overwrite/skip, progress,
-  cancel, result + lỗi từng file, `Open folder`.
+  quality 98/4:4:4, long-edge resize, preserve EXIF, overwrite/skip, CPU
+  performance (threads + parallel photos), progress, cancel, result + lỗi từng file,
+  `Open folder`.
 - **Status bar**: trạng thái worker, số selected/edited/unsupported, progress export,
   `Cancel`, summary.
 - **Empty state + drag/drop** toàn cửa sổ; toast; help modal; shortcut:
@@ -142,8 +147,10 @@ CR2/CR3/NEF/ARW/RAF/ORF/RW2/DNG (+ srw/pef/kdc/erf/... danh sách trong `RAW_EXT
 - PNG lossless 8-bit + EXIF; TIFF lossless 8-bit (chưa nhúng EXIF).
 - `max_dim` (long edge) decode trực tiếp qua imagepipe, không phóng to.
 - EXIF copy cho JPEG/PNG; orientation được chuẩn hoá; bỏ metadata quá lớn.
-- Batch song song: full-res tối đa 2 job, có `max_dim` tối đa 4 job (giới hạn RAM).
-- Overwrite hoặc Skip file đích; ghi file tạm rồi rename; `catch_unwind` per file.
+- Batch song song: full-res mặc định 2 job, có `max_dim` mặc định 4 job; người dùng
+  chỉnh threads + số ảnh song song trong Export → Performance (giới hạn RAM).
+- Overwrite hoặc Skip file đích; ghi ảnh qua `BufWriter`, file tạm rồi rename;
+  `catch_unwind` per file.
 - Progress theo từng file; Cancel sau file đang chạy; summary + danh sách lỗi.
 
 ### Auto tone
@@ -229,17 +236,43 @@ nguyên; `is_auto_applied = true`.
   Sau khi xác nhận mới đổi milestone này sang ✅ (xem runbook mục 8).
 - Không push/trigger CI từ môi trường này; người dùng thực hiện.
 
+### ✅ Milestone 6 — Export performance: CPU đa nhân (XONG)
+- `models/performance.rs`: `PerformanceSettings` (`multithreaded`, `threads`,
+  `concurrent_photos`) + resolve/clamp theo số logical core và giới hạn RAM.
+- `ExportSettings.performance`: snapshot theo từng batch export; Export panel có
+  mục Performance (bật/tắt đa nhân, auto/chỉnh threads, auto/chỉnh số ảnh song song).
+- `exporter.rs`: bỏ giới hạn cứng 2/4 thread; rayon pool dùng toàn bộ threads đã chọn;
+  scoped workers giới hạn số ảnh in-flight (`resolved_concurrency`) để kiểm soát RAM.
+  `pool.install` bao từng job nên demosaic/colorspace nội bộ imagepipe cũng chạy đa nhân.
+- `processor.rs`: `apply_srgb_into` xử lý theo chunk, ghi thẳng u8 (bỏ buffer `edited`
+  f32 full-size); `encode_srgb` song song theo chunk.
+- `decoder.rs`: đọc trực tiếp buffer linear f32 từ `Pipeline::run` thay vì
+  `output_16bit` + chuyển u16→f32 tuần tự; RGBA→RGB song song.
+- Tests: settings resolution/clamp, chunked-vs-apply+encode parity, single-thread vs
+  multi-thread output parity, batch nhiều job song song, Export panel headless.
+- Benchmark ignored: `export_benchmark_real_samples` chạy single/auto/high-concurrency
+  trên RAW thật; dùng release build khi đo.
+- Kết quả benchmark local (macOS 10 logical cores, 6 RAW ~24–26MP, full-res JPEG 98 4:4:4):
+  single-thread **7.02s** → auto **1.92s** (≈3.7×) → high-concurrency (4) **2.06s**.
+  Với 1 ảnh: 1.31s → 0.49s. Phần lớn gain đến từ `BufWriter` cho writer ảnh (trước đó
+  JPEG encoder ghi trực tiếp `File`, rất nhiều syscall nhỏ) + decode/process đa nhân.
+- **Gate:** `cargo fmt --all`, `cargo check`, `cargo test` (**105 passed, 5 ignored**),
+  `cargo clippy --all-targets -- -D warnings`, `cargo build`.
+
 ## 6. Testing strategy
 - **Fixture DNG 12x12 RGGB** trong `tests/common/mod.rs` (TIFF writer thủ công):
   Make/Model, DNGVersion, ColorMatrix1 = identity, AsShotNeutral (1,1,1), raw IFD
   16-bit uncompressed strip. Quy tắc: `count` TIFF entry là số VALUE, không phải byte;
   imagepipe cần cạnh ≥ 10 (`owidth-10`).
 - **Exporter tests** dùng fixture: JPEG/PNG/TIFF decode lại bằng `image`, EXIF đọc bằng
-  `kamadak-exif`, kiểm tra max_dim, temp cleanup, skip/overwrite, cancel, lỗi.
+  `kamadak-exif`, kiểm tra max_dim, temp cleanup, skip/overwrite, cancel, lỗi,
+  thread-parity (1 thread vs đa thread cho cùng pixel) và batch nhiều job song song.
+- **Performance tests**: `apply_srgb_into` chunked phải khớp `apply` + `encode_srgb`
+  trên buffer lớn; `PerformanceSettings` clamp threads/concurrency đúng.
 - **State/worker tests**: selection stats, filter, sync/reset, export jobs, export
   session events, probe/thumbnail/proxy jobs, `AppState::poll` headless.
-- **UI smoke**: `egui::Context::run_ui` render empty + Library/Develop; phải gọi
-  `output.textures_delta.clear()` trước khi drop `FullOutput`.
+- **UI smoke**: `egui::Context::run_ui` render empty + Library/Develop + Export
+  performance panel; phải gọi `output.textures_delta.clear()` trước khi drop `FullOutput`.
 - **Assets (M5)**: `assets_tests.rs` decode PNG master/runtime bằng `image`,
   parse ICONDIRENTRY của ICO (PNG payload, đủ 6 kích thước), kiểm tra magic ICNS,
   và đảm bảo `rawpeg.rc` + `Info.plist` tham chiếu đúng file icon.
@@ -343,19 +376,33 @@ nguyên; `is_auto_applied = true`.
     unsupported” nên vẫn được chọn; `DecodeStatus::Error` cũng bị coi là unsupported.
     Nếu probe sau đó đánh dấu unsupported, selection không tự đổi — exporter vẫn skip;
     người dùng bấm `Deselect unsupported` để dọn.
+48. **Nested rayon pool (M6):** `ThreadPool::install` áp dụng cho cả các `par_iter`
+    bên trong `imagepipe`; pool 2/4 thread cũ vô tình giới hạn demosaic/colorspace.
+    Phải build pool theo `PerformanceSettings::resolved_threads()` và `install` từng job.
+49. **Bounded concurrency (M6):** tách “số thread” khỏi “số ảnh song song”; full-res
+    decode giữ nhiều buffer lớn, nên mặc định 2 ảnh full-res / 4 ảnh resize và cho
+    người dùng chỉnh trong giới hạn `MAX_CONCURRENT_PHOTOS`.
+50. **Chunked export (M6):** `apply_srgb_into` ghi thẳng u8 theo chunk, bỏ buffer
+    `edited` f32 full-size; giảm peak RAM đáng kể và cho phép tăng concurrency an toàn.
+51. **Direct linear decode (M6):** `Pipeline::run` trả buffer f32 trực tiếp; tránh
+    `output_16bit` (quantize + vòng lặp u16→f32 tuần tự). Kết quả có thể lệch ±1 LSB
+    so với đường cũ do bỏ quantization; đã clamp 0..=1 để giữ invariant.
+52. **Buffered image writes (M6):** luôn bọc writer bằng `BufWriter` trước khi đưa vào
+    `jpeg-encoder`/PNG/TIFF. Truyền `File` trần làm encoder phát nhiều write nhỏ; đo
+    trên macOS 26MP: encode 1.3s → ~0.2s, nhanh hơn cả phần decode đa nhân.
 
 ## 8. Command thường dùng
 ```bash
 cargo check                    # gate biên dịch
-cargo test                     # 94 passed, 4 ignored
+cargo test                     # 105 passed, 5 ignored
 cargo clippy --all-targets -- -D warnings
 cargo build                    # debug
 ./scripts/verify_local.sh      # gate 4 bước đầy đủ
 cargo run                      # chạy GUI batch-first
 
-cargo test --test exporter_tests        # 11 test export
+cargo test --test exporter_tests        # 13 test export
 cargo test --test app_worker_tests      # 8 test worker/state
-cargo test --test ui_smoke_tests        # 3 test render headless
+cargo test --test ui_smoke_tests        # 4 test render headless
 cargo test --test assets_tests          # 5 test icon/plist (M5)
 
 # Icon assets (macOS; output đã commit, chỉ chạy khi đổi icon):
@@ -370,6 +417,9 @@ git push origin v0.1.0
 RAW_SAMPLE=dir/canon_6d.cr2 cargo test --test decoder_tests decode_real_sample -- --ignored
 RAW_DIR=rawimage cargo test --test real_pipeline_tests -- --ignored --nocapture
 
+# Benchmark CPU đa nhân trên RAW thật (release, CHỈ chạy khi được người dùng đồng ý):
+RAW_DIR=rawimage cargo test --release --test real_pipeline_tests export_benchmark_real_samples -- --ignored --nocapture
+
 cargo run --example render_previews -- rawimage --max-dim 2560
 ```
 
@@ -378,6 +428,9 @@ cargo run --example render_previews -- rawimage --max-dim 2560
 - TIFF chưa nhúng EXIF; PNG/TIFF 8-bit (chưa có 16-bit output).
 - Chưa có preset export, undo/redo, lưu settings giữa các lần chạy, batch auto-tone
   theo từng ảnh, hay hỗ trợ camera mới hơn 2019.
+- GPU acceleration chưa làm (M6 CPU-first). Decode/demosaic của imagepipe/rawloader là
+  CPU-only; nếu thêm sau, `wgpu` compute chỉ tăng tốc edit + sRGB encode (ước tính
+  10–25%), cần toggle + fallback và đo lại trên Windows/macOS trước khi bật mặc định.
 - Icon hiện tại là placeholder sinh bởi `scripts/make_icons.py`; có thể thay artwork
   bằng PNG 1024×1024 rồi chạy lại script.
 - App chưa ký/notarize: macOS có thể báo “unidentified developer”, Windows SmartScreen

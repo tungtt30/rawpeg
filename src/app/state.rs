@@ -184,6 +184,8 @@ pub struct ExportSession {
     pub failed: usize,
     pub skipped: usize,
     pub current: Option<String>,
+    /// Photos currently being processed (export can run several in parallel).
+    pub active: usize,
     pub started: Instant,
     pub cancel: Arc<AtomicBool>,
     pub cancelling: bool,
@@ -202,6 +204,7 @@ impl ExportSession {
             failed: 0,
             skipped: 0,
             current: None,
+            active: 0,
             started: Instant::now(),
             cancel,
             cancelling: false,
@@ -229,9 +232,13 @@ impl ExportSession {
     pub fn apply(&mut self, event: &ExportEvent) {
         match event {
             ExportEvent::Started { total } => self.total = *total,
-            ExportEvent::ItemStarted { current } => self.current = Some(current.clone()),
+            ExportEvent::ItemStarted { current } => {
+                self.active = self.active.saturating_add(1);
+                self.current = Some(current.clone());
+            }
             ExportEvent::ItemFinished { outcome } => {
                 self.done = self.done.saturating_add(1).min(self.total);
+                self.active = self.active.saturating_sub(1);
                 if outcome.skipped {
                     self.skipped += 1;
                 } else if outcome.result.is_ok() {
@@ -239,7 +246,9 @@ impl ExportSession {
                 } else {
                     self.failed += 1;
                 }
-                self.current = None;
+                if self.active == 0 {
+                    self.current = None;
+                }
             }
             ExportEvent::Finished { summary } => {
                 self.total = summary.total;
@@ -247,12 +256,14 @@ impl ExportSession {
                 self.succeeded = summary.succeeded;
                 self.failed = summary.failed;
                 self.skipped = summary.skipped;
+                self.active = 0;
                 self.current = None;
                 self.cancelling = false;
                 self.finished = true;
                 self.summary = Some(summary.clone());
             }
             ExportEvent::Fatal { message } => {
+                self.active = 0;
                 self.current = None;
                 self.fatal = Some(message.clone());
                 self.finished = true;
@@ -1178,6 +1189,39 @@ mod tests {
         assert_eq!(session.done, 3);
         assert_eq!(session.elapsed(), Duration::from_secs(2));
         assert_eq!(session.progress(), 1.0);
+    }
+
+    #[test]
+    fn export_session_keeps_current_while_another_photo_is_active() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut session = ExportSession::new(2, 2, cancel);
+        session.apply(&ExportEvent::ItemStarted {
+            current: "a.dng".into(),
+        });
+        session.apply(&ExportEvent::ItemStarted {
+            current: "b.dng".into(),
+        });
+        session.apply(&ExportEvent::ItemFinished {
+            outcome: ExportOutcome {
+                source: PathBuf::from("a.dng"),
+                output: PathBuf::from("a.jpg"),
+                result: Ok(()),
+                skipped: false,
+            },
+        });
+        assert_eq!(session.active, 1);
+        assert_eq!(session.current.as_deref(), Some("b.dng"));
+
+        session.apply(&ExportEvent::ItemFinished {
+            outcome: ExportOutcome {
+                source: PathBuf::from("b.dng"),
+                output: PathBuf::from("b.jpg"),
+                result: Ok(()),
+                skipped: false,
+            },
+        });
+        assert_eq!(session.active, 0);
+        assert_eq!(session.current, None);
     }
 
     #[test]

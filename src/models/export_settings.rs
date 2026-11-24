@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use super::PerformanceSettings;
+
 /// Output format for batch exports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
@@ -52,6 +54,8 @@ pub struct ExportSettings {
     pub overwrite: bool,
     /// `None` writes next to each source file.
     pub output_dir: Option<PathBuf>,
+    /// CPU parallelism used by the batch exporter.
+    pub performance: PerformanceSettings,
 }
 
 impl Default for ExportSettings {
@@ -64,6 +68,7 @@ impl Default for ExportSettings {
             keep_exif: true,
             overwrite: true,
             output_dir: None,
+            performance: PerformanceSettings::default(),
         }
     }
 }
@@ -106,6 +111,7 @@ mod tests {
         assert!(settings.keep_exif);
         assert!(settings.overwrite);
         assert_eq!(settings.output_dir, None);
+        assert_eq!(settings.performance, PerformanceSettings::default());
     }
 
     #[test]

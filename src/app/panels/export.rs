@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, Label, RichText, Vec2};
 
 use crate::app::state::{AppState, ToastKind};
 use crate::app::worker::Worker;
-use crate::models::{ExportFormat, ExportSettings};
+use crate::models::{ExportFormat, ExportSettings, PerformanceSettings};
 
 use super::widgets::{ACCENT, DANGER, MUTED, SUCCESS, format_duration};
 
@@ -179,6 +179,94 @@ pub fn panel(ui: &mut egui::Ui, state: &mut AppState, worker: &Worker) {
             ui.radio_value(&mut state.export_settings.overwrite, false, "Skip");
         });
 
+        ui.add_space(10.0);
+        ui.label(RichText::new("Performance").strong());
+        let full_resolution = state.export_settings.max_dim.is_none();
+        let max_threads = PerformanceSettings::max_threads();
+        let perf = &mut state.export_settings.performance;
+        ui.checkbox(&mut perf.multithreaded, "Use multiple CPU cores")
+            .on_hover_text("Off exports one photo at a time on a single CPU thread.");
+        ui.add_enabled_ui(perf.multithreaded, |ui| {
+            let mut auto_threads = perf.threads == 0;
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut auto_threads, "Auto threads").changed() {
+                    perf.threads = if auto_threads { 0 } else { max_threads };
+                }
+                if auto_threads {
+                    ui.label(
+                        RichText::new(format!("{max_threads} logical cores"))
+                            .small()
+                            .color(MUTED),
+                    );
+                } else {
+                    let mut threads = perf.threads.clamp(1, max_threads);
+                    if max_threads <= 1 {
+                        ui.label(RichText::new("1 logical core").small().color(MUTED));
+                    } else if ui
+                        .add(
+                            egui::Slider::new(&mut threads, 1..=max_threads)
+                                .text("threads")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        perf.threads = threads;
+                    }
+                }
+            });
+
+            let mut auto_photos = perf.concurrent_photos == 0;
+            let default_photos = if full_resolution { 2 } else { 4 };
+            ui.horizontal(|ui| {
+                if ui
+                    .checkbox(&mut auto_photos, "Auto parallel photos")
+                    .changed()
+                {
+                    perf.concurrent_photos = if auto_photos {
+                        0
+                    } else {
+                        default_photos.min(perf.max_concurrent_photos())
+                    };
+                }
+                if auto_photos {
+                    ui.label(
+                        RichText::new(format!("{default_photos} for this size"))
+                            .small()
+                            .color(MUTED),
+                    );
+                } else {
+                    let max = perf.max_concurrent_photos().max(1);
+                    let mut photos = perf.concurrent_photos.clamp(1, max);
+                    if max <= 1 {
+                        ui.label(RichText::new("1 photo at a time").small().color(MUTED));
+                    } else if ui
+                        .add(
+                            egui::Slider::new(&mut photos, 1..=max)
+                                .text("photos at once")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        perf.concurrent_photos = photos;
+                    }
+                }
+            });
+            ui.label(
+                RichText::new("More parallel photos use more RAM. Full-size exports default to 2.")
+                    .small()
+                    .color(MUTED),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "Using {} CPU thread(s) · {} photo(s) at once",
+                    perf.resolved_threads(),
+                    perf.resolved_concurrency(full_resolution)
+                ))
+                .small()
+                .color(MUTED),
+            );
+        });
+
         ui.add_space(14.0);
         if stats.selected_unsupported > 0 {
             ui.label(
@@ -320,6 +408,11 @@ fn export_progress(
                 .unwrap_or_else(|| current.to_string())
         })
         .unwrap_or_else(|| "preparing…".to_string());
+    let current = if session.active > 1 {
+        format!("{current} (+{} more)", session.active - 1)
+    } else {
+        current
+    };
     ui.label(RichText::new(current).small().color(MUTED));
     ui.horizontal(|ui| {
         if session.cancelling {
