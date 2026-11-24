@@ -9,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 
 use common::write_fixture_dng;
 use exif::{In, Tag, Value};
-use rawpeg::models::{EditParams, ExportFormat, ExportSettings};
+use rawpeg::models::{EditParams, ExportFormat, ExportSettings, PerformanceSettings};
 use rawpeg::raw_engine::exporter::{ExportEvent, ExportJob, ExportSummary, export_batch};
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -299,4 +299,78 @@ fn duplicate_outputs_are_reported_not_overwritten() {
         summary.failures[0].message
     );
     assert!(out.join("photo.jpg").exists());
+}
+
+#[test]
+fn multithreaded_export_matches_single_threaded_output() {
+    let dir = temp_dir("threads-parity");
+    let source = fixture(&dir);
+    let single_dir = dir.join("single");
+    let multi_dir = dir.join("multi");
+    std::fs::create_dir_all(&single_dir).unwrap();
+    std::fs::create_dir_all(&multi_dir).unwrap();
+
+    let mut single = settings(ExportFormat::Png, &single_dir);
+    single.performance = PerformanceSettings {
+        multithreaded: false,
+        ..Default::default()
+    };
+    let mut multi = settings(ExportFormat::Png, &multi_dir);
+    multi.performance = PerformanceSettings {
+        multithreaded: true,
+        threads: 4,
+        concurrent_photos: 2,
+    };
+
+    let single_jobs = vec![job(0, &source, &single)];
+    let multi_jobs = vec![job(0, &source, &multi)];
+    let (single_summary, _) = run(&single_jobs, &single, &AtomicBool::new(false));
+    let (multi_summary, _) = run(&multi_jobs, &multi, &AtomicBool::new(false));
+    assert_eq!(single_summary.succeeded, 1, "summary: {single_summary:?}");
+    assert_eq!(multi_summary.succeeded, 1, "summary: {multi_summary:?}");
+
+    let single_pixels = image::open(&single_jobs[0].output)
+        .unwrap()
+        .to_rgb8()
+        .into_raw();
+    let multi_pixels = image::open(&multi_jobs[0].output)
+        .unwrap()
+        .to_rgb8()
+        .into_raw();
+    assert_eq!(single_pixels, multi_pixels);
+}
+
+#[test]
+fn parallel_export_processes_multiple_jobs() {
+    let dir = temp_dir("parallel-batch");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let settings = ExportSettings {
+        output_dir: Some(out.clone()),
+        performance: PerformanceSettings {
+            multithreaded: true,
+            threads: 4,
+            concurrent_photos: 3,
+        },
+        ..Default::default()
+    };
+
+    let mut jobs = Vec::new();
+    for index in 0..6 {
+        let source = dir.join(format!("photo-{index}.dng"));
+        write_fixture_dng(&source).unwrap();
+        jobs.push(ExportJob {
+            index,
+            source: source.clone(),
+            output: settings.output_path(&source),
+            params: EditParams::default(),
+        });
+    }
+
+    let (summary, _) = run(&jobs, &settings, &AtomicBool::new(false));
+    assert_eq!(summary.succeeded, jobs.len(), "summary: {summary:?}");
+    assert_eq!(summary.failed, 0);
+    for job in &jobs {
+        assert!(job.output.exists(), "missing '{}'", job.output.display());
+    }
 }

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use exif::{In, Reader, Tag, Value};
 use imagepipe::Pipeline;
+use rayon::prelude::*;
 
 use crate::models::ExifSummary;
 
@@ -124,20 +125,62 @@ pub fn decode_linear_scaled(path: &Path, max_dim: usize) -> Result<DecodedImage>
     let mut pipeline = new_pipeline(path, max_dim)?;
     pipeline.ops.basecurve.points = vec![];
     pipeline.ops.basecurve.exposure = 0.0;
+    pipeline.globals.settings.linear = true;
 
-    let img = pipeline
-        .output_16bit(None)
-        .map_err(|e| anyhow!("imagepipe failed to process '{}': {}", path.display(), e))?;
+    // Read imagepipe's linear f32 buffer directly instead of going through the
+    // 16-bit output path, which quantizes and then converts serially. The
+    // returned buffer has `colors` channels per pixel (4 for RAW pipelines).
+    let buffer = pipeline.run(None);
+    let colors = buffer.colors;
+    if !matches!(colors, 3 | 4) {
+        return Err(anyhow!(
+            "imagepipe returned {colors} channels for '{}'",
+            path.display()
+        ));
+    }
+    let expected = buffer
+        .width
+        .checked_mul(buffer.height)
+        .and_then(|pixels| pixels.checked_mul(colors))
+        .ok_or_else(|| anyhow!("decoded image dimensions overflow"))?;
+    if buffer.data.len() != expected {
+        return Err(anyhow!(
+            "imagepipe returned {} values for {}x{}x{} image",
+            buffer.data.len(),
+            buffer.width,
+            buffer.height,
+            colors
+        ));
+    }
 
-    let inv = 1.0 / 65535.0;
-    let data = img
-        .data
-        .chunks_exact(3)
-        .map(|p| [p[0] as f32 * inv, p[1] as f32 * inv, p[2] as f32 * inv])
-        .collect();
+    let data = if buffer.data.len() >= 16_384 * 4 {
+        buffer
+            .data
+            .par_chunks_exact(colors)
+            .map(|p| {
+                [
+                    p[0].clamp(0.0, 1.0),
+                    p[1].clamp(0.0, 1.0),
+                    p[2].clamp(0.0, 1.0),
+                ]
+            })
+            .collect()
+    } else {
+        buffer
+            .data
+            .chunks_exact(colors)
+            .map(|p| {
+                [
+                    p[0].clamp(0.0, 1.0),
+                    p[1].clamp(0.0, 1.0),
+                    p[2].clamp(0.0, 1.0),
+                ]
+            })
+            .collect()
+    };
     Ok(DecodedImage {
-        width: img.width,
-        height: img.height,
+        width: buffer.width,
+        height: buffer.height,
         data,
     })
 }

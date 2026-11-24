@@ -3,10 +3,12 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Write};
+use std::io::{BufReader, BufWriter, Cursor, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -16,7 +18,7 @@ use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
 
 use crate::models::{EditParams, ExportFormat, ExportSettings};
 use crate::raw_engine::decoder::decode_linear_scaled;
-use crate::raw_engine::processor::{apply, encode_srgb};
+use crate::raw_engine::processor::apply_srgb_into;
 
 /// One file scheduled for export.
 #[derive(Clone, Debug)]
@@ -147,32 +149,6 @@ pub fn export_batch(
         }
     }
 
-    let run = |job: &ExportJob| -> Option<ExportOutcome> {
-        if cancel.load(Ordering::Relaxed) {
-            return None;
-        }
-        on_event(ExportEvent::ItemStarted {
-            current: job.source.to_string_lossy().into_owned(),
-        });
-        let outcome = export_one_caught(job, settings);
-        on_event(ExportEvent::ItemFinished {
-            outcome: outcome.clone(),
-        });
-        Some(outcome)
-    };
-
-    let num_threads = match settings.max_dim {
-        Some(_) => 4,
-        None => 2,
-    };
-    let num_threads = num_threads
-        .min(
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(2),
-        )
-        .max(1);
-
     for outcome in &duplicate_outcomes {
         on_event(ExportEvent::ItemStarted {
             current: outcome.source.to_string_lossy().into_owned(),
@@ -182,17 +158,20 @@ pub fn export_batch(
         });
     }
 
-    let outcomes: Vec<Option<ExportOutcome>> = match rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .thread_name(|i| format!("rawpeg-export-{i}"))
-        .build()
-    {
-        Ok(pool) => pool.install(|| {
-            use rayon::prelude::*;
-            unique_jobs.par_iter().map(|job| run(job)).collect()
-        }),
-        Err(_) => unique_jobs.iter().map(|job| run(job)).collect(),
-    };
+    let full_resolution = settings.max_dim.is_none();
+    let threads = settings.performance.resolved_threads();
+    let concurrency = settings
+        .performance
+        .resolved_concurrency(full_resolution)
+        .min(unique_jobs.len().max(1));
+    let outcomes = run_unique_jobs(
+        &unique_jobs,
+        settings,
+        cancel,
+        on_event,
+        threads,
+        concurrency,
+    );
 
     for outcome in outcomes.into_iter().flatten().chain(duplicate_outcomes) {
         if outcome.skipped {
@@ -218,6 +197,82 @@ pub fn export_batch(
     summary
 }
 
+fn run_one(
+    job: &ExportJob,
+    settings: &ExportSettings,
+    cancel: &AtomicBool,
+    on_event: &(dyn Fn(ExportEvent) + Send + Sync),
+) -> Option<ExportOutcome> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    on_event(ExportEvent::ItemStarted {
+        current: job.source.to_string_lossy().into_owned(),
+    });
+    let outcome = export_one_caught(job, settings);
+    on_event(ExportEvent::ItemFinished {
+        outcome: outcome.clone(),
+    });
+    Some(outcome)
+}
+
+/// Runs `jobs` with at most `concurrency` photos in flight while every photo
+/// uses `threads` Rayon workers for its internal row-parallel work.
+///
+/// The bounded concurrency keeps peak memory predictable; the Rayon pool is
+/// still sized to all requested cores so imagepipe's demosaic/colorspace ops
+/// are no longer restricted to the number of concurrent photos.
+fn run_unique_jobs(
+    jobs: &[&ExportJob],
+    settings: &ExportSettings,
+    cancel: &AtomicBool,
+    on_event: &(dyn Fn(ExportEvent) + Send + Sync),
+    threads: usize,
+    concurrency: usize,
+) -> Vec<Option<ExportOutcome>> {
+    if jobs.is_empty() {
+        return Vec::new();
+    }
+    let concurrency = concurrency.clamp(1, jobs.len());
+
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(threads.max(1))
+        .thread_name(|i| format!("rawpeg-export-{i}"))
+        .build()
+    {
+        Ok(pool) => {
+            let next = AtomicUsize::new(0);
+            let outcomes = Mutex::new((0..jobs.len()).map(|_| None).collect::<Vec<_>>());
+            thread::scope(|scope| {
+                for _ in 0..concurrency {
+                    scope.spawn(|| {
+                        loop {
+                            let index = next.fetch_add(1, Ordering::Relaxed);
+                            if index >= jobs.len() {
+                                break;
+                            }
+                            let outcome =
+                                pool.install(|| run_one(jobs[index], settings, cancel, on_event));
+                            if let Ok(mut guard) = outcomes.lock() {
+                                guard[index] = outcome;
+                            }
+                        }
+                    });
+                }
+            });
+            outcomes
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+        Err(error) => {
+            log::warn!("failed to build export thread pool ({error}); running sequentially");
+            jobs.iter()
+                .map(|job| run_one(job, settings, cancel, on_event))
+                .collect()
+        }
+    }
+}
+
 fn export_one_caught(job: &ExportJob, settings: &ExportSettings) -> ExportOutcome {
     match catch_unwind(AssertUnwindSafe(|| export_one(job, settings))) {
         Ok(Ok(ExportOne::Written)) => ExportOutcome::written(job),
@@ -237,21 +292,29 @@ fn export_one(job: &ExportJob, settings: &ExportSettings) -> Result<ExportOne> {
         return Ok(ExportOne::Skipped);
     }
 
+    let total_started = Instant::now();
+    let decode_started = Instant::now();
     let decoded = decode_linear_scaled(
         &job.source,
         settings.max_dim.map(|dim| dim as usize).unwrap_or(0),
     )
     .with_context(|| format!("decode '{}'", job.source.display()))?;
+    let decode_elapsed = decode_started.elapsed();
 
     if decoded.width == 0 || decoded.height == 0 {
         return Err(anyhow!("decoded image has no area"));
     }
 
-    let edited = apply(&decoded, &job.params);
-    let rgb = encode_srgb(&edited);
     let width = decoded.width;
     let height = decoded.height;
+    let process_started = Instant::now();
+    let mut rgb = vec![0u8; decoded.data.len() * 3];
+    apply_srgb_into(&decoded, &job.params, &mut rgb);
+    let process_elapsed = process_started.elapsed();
+    drop(decoded);
+    let write_started = Instant::now();
 
+    let exif_started = Instant::now();
     let exif = if settings.keep_exif && settings.format.supports_exif() {
         build_exif_block(&job.source, width as u32, height as u32)
             .ok()
@@ -259,6 +322,7 @@ fn export_one(job: &ExportJob, settings: &ExportSettings) -> Result<ExportOne> {
     } else {
         None
     };
+    let exif_elapsed = exif_started.elapsed();
 
     if let Some(parent) = job.output.parent() {
         std::fs::create_dir_all(parent)
@@ -285,6 +349,15 @@ fn export_one(job: &ExportJob, settings: &ExportSettings) -> Result<ExportOne> {
     }
     std::fs::rename(&temp, &job.output)
         .with_context(|| format!("move '{}' -> '{}'", temp.display(), job.output.display()))?;
+    log::debug!(
+        "export '{}': decode={:?} process={:?} exif={:?} write={:?} total={:?}",
+        job.source.display(),
+        decode_elapsed,
+        process_elapsed,
+        exif_elapsed,
+        write_started.elapsed(),
+        total_started.elapsed()
+    );
     Ok(ExportOne::Written)
 }
 
@@ -300,6 +373,10 @@ fn write_image(
     let sync_handle = file
         .try_clone()
         .with_context(|| format!("duplicate handle for '{}'", path.display()))?;
+    // Buffer encoder writes; otherwise the JPEG/PNG/TIFF writers issue many
+    // small syscalls while encoding large images.
+    let mut writer = BufWriter::with_capacity(1 << 20, file);
+    let encode_started = Instant::now();
     match settings.format {
         ExportFormat::Jpeg => {
             if width > u16::MAX as usize || height > u16::MAX as usize {
@@ -307,7 +384,7 @@ fn write_image(
                     "JPEG dimensions {width}x{height} exceed the 65535px limit"
                 ));
             }
-            let mut encoder = Encoder::new(file, settings.clamped_quality());
+            let mut encoder = Encoder::new(&mut writer, settings.clamped_quality());
             encoder.set_sampling_factor(if settings.chroma_444 {
                 SamplingFactor::F_1_1
             } else {
@@ -324,7 +401,7 @@ fn write_image(
         }
         ExportFormat::Png => {
             let mut encoder = image::codecs::png::PngEncoder::new_with_quality(
-                file,
+                &mut writer,
                 image::codecs::png::CompressionType::Fast,
                 image::codecs::png::FilterType::Adaptive,
             );
@@ -343,7 +420,7 @@ fn write_image(
                 .with_context(|| format!("encode PNG '{}'", path.display()))?;
         }
         ExportFormat::Tiff => {
-            let encoder = image::codecs::tiff::TiffEncoder::new(file);
+            let encoder = image::codecs::tiff::TiffEncoder::new(&mut writer);
             encoder
                 .write_image(
                     rgb,
@@ -356,9 +433,19 @@ fn write_image(
     }
     // Flush errors (disk full etc.) must not disappear when the encoder is
     // dropped; surface them before the caller renames the temp file.
+    writer
+        .flush()
+        .with_context(|| format!("flush '{}'", path.display()))?;
+    let encode_elapsed = encode_started.elapsed();
+    let sync_started = Instant::now();
     sync_handle
         .sync_all()
         .with_context(|| format!("flush '{}'", path.display()))?;
+    log::debug!(
+        "write '{}': encode={encode_elapsed:?} sync={:?}",
+        path.display(),
+        sync_started.elapsed()
+    );
     Ok(())
 }
 

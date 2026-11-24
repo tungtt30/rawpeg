@@ -251,3 +251,94 @@ fn exporter_handles_real_sample() {
     );
     let _ = std::fs::remove_dir_all(&out);
 }
+
+/// Manual benchmark for the CPU parallelism settings.
+///
+/// Run on a release build (needs real RAW files):
+/// `RAW_DIR=rawimage cargo test --release --test real_pipeline_tests export_benchmark_real_samples -- --ignored --nocapture`
+///
+/// `RAW_BENCH_COUNT` selects how many samples to export (default 3).
+#[test]
+#[ignore]
+fn export_benchmark_real_samples() {
+    use std::sync::atomic::AtomicBool;
+
+    use rawpeg::models::{ExportSettings, PerformanceSettings};
+    use rawpeg::raw_engine::exporter::{ExportJob, export_batch};
+
+    let _ = env_logger::builder().is_test(true).try_init();
+    let count = std::env::var("RAW_BENCH_COUNT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3usize);
+
+    let dir = sample_dir();
+    let files = scan_directory(&dir).expect("scan sample directory");
+    let samples: Vec<PathBuf> = files
+        .iter()
+        .filter(|path| probe_support(path) == DecodeStatus::Supported)
+        .take(count)
+        .cloned()
+        .collect();
+    assert!(
+        !samples.is_empty(),
+        "no supported raw sample found in '{}'",
+        dir.display()
+    );
+
+    let root = std::env::temp_dir().join(format!("rawpeg-bench-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+
+    let configs = [
+        (
+            "single-thread",
+            PerformanceSettings {
+                multithreaded: false,
+                threads: 0,
+                concurrent_photos: 0,
+            },
+        ),
+        ("auto", PerformanceSettings::default()),
+        (
+            "high-concurrency",
+            PerformanceSettings {
+                multithreaded: true,
+                threads: 0,
+                concurrent_photos: 4,
+            },
+        ),
+    ];
+
+    for (name, performance) in configs {
+        let out = root.join(name);
+        std::fs::create_dir_all(&out).unwrap();
+        let settings = ExportSettings {
+            output_dir: Some(out),
+            max_dim: None,
+            performance,
+            ..Default::default()
+        };
+        let jobs: Vec<ExportJob> = samples
+            .iter()
+            .enumerate()
+            .map(|(index, source)| ExportJob {
+                index,
+                source: source.clone(),
+                output: settings.output_path(source),
+                params: EditParams::default(),
+            })
+            .collect();
+        let summary = export_batch(&jobs, &settings, &AtomicBool::new(false), &|_| {});
+        println!(
+            "{name:16} {:?} for {} file(s): {} ok, {} failed, {} skipped",
+            summary.elapsed,
+            samples.len(),
+            summary.succeeded,
+            summary.failed,
+            summary.skipped
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
