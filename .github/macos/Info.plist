@@ -10,6 +10,8 @@
 	<string>com.tungtt30.rawpeg</string>
 	<key>CFBundleExecutable</key>
 	<string>rawpeg</string>
+	<key>CFBundleIconFile</key>
+	<string>rawpeg.icns</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleVersion</key>

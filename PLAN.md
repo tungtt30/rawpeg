@@ -26,14 +26,18 @@ ghi lại các quyết định kỹ thuật cùng bài học khi triển khai đ
 
 ```text
 rawpeg/
-├── Cargo.toml                         # + jpeg-encoder 0.7.1
+├── Cargo.toml                         # + jpeg-encoder 0.7.1; build-dep embed-resource (Windows)
 ├── PLAN.md                            # file này
+├── build.rs                           # ✅ M5: nhúng icon vào .exe Windows
+├── rawpeg.rc                          # ✅ M5: resource script (IDI_ICON1)
+├── assets/                            # ✅ M5: icon-source.png, rawpeg.ico, rawpeg.icns, rawpeg-256.png
 ├── .github/
-│   ├── workflows/ci.yml               # ✅ CI build check: Windows x64 + macOS universal
-│   └── macos/Info.plist               # bundle metadata cho rawpeg.app
+│   ├── workflows/ci.yml               # ✅ CI build check + release khi tag v*
+│   └── macos/Info.plist               # bundle metadata + CFBundleIconFile
 ├── scripts/
+│   ├── make_icons.py                  # ✅ M5: sinh icon assets (macOS, stdlib + sips/iconutil)
 │   ├── fetch_samples.sh               # tải RAW mẫu CC0 từ raw.pixls.us
-│   └── package_macos.sh               # gói binary(s) → rawpeg.app + zip (CI + local)
+│   └── package_macos.sh               # gói binary(s) → rawpeg.app + icon + version (CI + local)
 ├── src/
 │   ├── lib.rs                         # pub mod app / models / raw_engine
 │   ├── main.rs                        # eframe entry; window 1320×860, min 1040×680
@@ -66,6 +70,7 @@ rawpeg/
     ├── app_worker_tests.rs            # ✅ 8 tests: probe/thumbnails/proxy/auto-tone/state export/proxy failure
     ├── exporter_tests.rs              # ✅ 11 tests: JPEG/PNG/TIFF, EXIF, resize, skip, cancel, lỗi, duplicate output
     ├── ui_smoke_tests.rs              # ✅ 2 tests: render headless empty + Library/Develop
+    ├── assets_tests.rs                 # ✅ 5 tests M5: PNG/ICO/ICNS, rc + Info.plist
     └── real_pipeline_tests.rs          # ✅ ignored: full pipeline + exporter trên RAW thật
 ```
 
@@ -196,11 +201,28 @@ nguyên; `is_auto_applied = true`.
 - Real-sample ignored test: `exporter_handles_real_sample` (RAW_DIR) pass với
   `rawimage/DHD_5747.nef` → JPEG 1069×1600.
 
-### ⏳ Milestone 5 — GitHub Actions CI/CD
+### ⏳ Milestone 5 — GitHub Actions CI/CD (code xong, chờ tag release)
 - ✅ CI build check đã chạy thành công (run #45201774320, 2026-11-23):
   Windows x64 zip + macOS universal zip.
-- ⏳ Còn lại: trigger tag `v*` → GitHub Release tự động (softprops/action-gh-release),
-  icon Windows (`embed-resource`), và build release sau khi merge M3-R/M4.
+- ✅ Release pipeline trong `ci.yml`:
+  - trigger thêm `tags: ["v*"]`; `concurrency` không cancel tag release.
+  - `preflight`: đọc version từ `Cargo.toml` bằng `tomllib`, fail nếu tag khác `v{version}`.
+  - `release`: `needs: [preflight, build]`, tải artifact, sinh `SHA256SUMS.txt`,
+    `softprops/action-gh-release@v2` với `generate_release_notes`,
+    `fail_on_unmatched_files`, prerelease cho tag có `-`.
+  - `permissions: contents: read` mặc định; job release có `contents: write`.
+- ✅ Windows icon:
+  - `build.rs` + `rawpeg.rc` + `embed-resource 3.0` (chỉ build-dependency Windows);
+    icon nhúng vào `.exe` (Explorer/taskbar).
+  - Runtime window icon qua `eframe::icon_data::from_png_bytes` + `ViewportBuilder::with_icon`.
+- ✅ macOS icon/bundle:
+  - `assets/rawpeg.icns` → `Contents/Resources/`; `CFBundleIconFile` trong Info.plist.
+  - `package_macos.sh` inject version từ `Cargo.toml` bằng `plutil` (không hardcode).
+- ✅ Icon assets: `scripts/make_icons.py` sinh PNG master 1024, ICO 6 kích thước
+  (PNG payload), ICNS; output commit sẵn; `tests/assets_tests.rs` kiểm tra.
+- ⏳ Còn lại (chỉ người dùng thực hiện): push `main` → CI xanh; tạo tag `v0.1.0`
+  và push tag → xác nhận GitHub Release có 2 zip + `SHA256SUMS.txt`; tải/mở thử app.
+  Sau khi xác nhận mới đổi milestone này sang ✅ (xem runbook mục 8).
 - Không push/trigger CI từ môi trường này; người dùng thực hiện.
 
 ## 6. Testing strategy
@@ -214,6 +236,9 @@ nguyên; `is_auto_applied = true`.
   session events, probe/thumbnail/proxy jobs, `AppState::poll` headless.
 - **UI smoke**: `egui::Context::run_ui` render empty + Library/Develop; phải gọi
   `output.textures_delta.clear()` trước khi drop `FullOutput`.
+- **Assets (M5)**: `assets_tests.rs` decode PNG master/runtime bằng `image`,
+  parse ICONDIRENTRY của ICO (PNG payload, đủ 6 kích thước), kiểm tra magic ICNS,
+  và đảm bảo `rawpeg.rc` + `Info.plist` tham chiếu đúng file icon.
 - **Real RAW** (ignored): `RAW_DIR=rawimage cargo test --test real_pipeline_tests -- --ignored --nocapture`
   chạy full pipeline + exporter trên mẫu thật; file unsupported được báo, không fail.
 - **Gate bắt buộc:** `./scripts/verify_local.sh` (check/test/clippy -D warnings/build).
@@ -292,11 +317,29 @@ nguyên; `is_auto_applied = true`.
 40. **Export finished:** `begin_export` chỉ chặn khi session chưa finished; UI dùng
     `!session.finished` cho label/active. Nếu không, nút Export đứng ở “Exporting…”
     sau khi xong và không cho chạy batch mới cho tới khi Dismiss.
+41. **`embed-resource` 3.x:** API là `compile(rc, NONE).manifest_optional()`
+    (`CompilationResult` là `#[must_use]`). Dùng
+    `[target.'cfg(windows)'.build-dependencies]` + `#[cfg(windows)]` trong `build.rs`
+    để macOS không cần windres. Đặt `rawpeg.rc` ở crate root và tham chiếu
+    `assets/rawpeg.ico` để tránh lệch đường dẫn.
+42. **ICO PNG payload:** Windows Vista+ chấp nhận entry là PNG; kích thước 256 ghi
+    byte width/height = 0. Test phải đọc ICONDIRENTRY (offset 6 + i*16) để kiểm tra
+    payload và thứ tự kích thước.
+43. **macOS icon/version:** cần cả `CFBundleIconFile` và file trong
+    `Contents/Resources/`. Version bundle được `plutil -replace` từ `Cargo.toml`
+    trong `package_macos.sh`, tránh Info.plist hardcode lệch tag.
+44. **Release gate:** preflight so tag `v{version}` với `Cargo.toml` trước khi build;
+    `cargo test --locked` chạy trong matrix; job release chỉ tải artifact
+    (`pattern: rawpeg-*`, `merge-multiple`) rồi mới tạo release + checksums.
+45. **Icon runtime:** `eframe::icon_data::from_png_bytes` + `with_icon` cho cửa sổ;
+    icon trong `.exe` (Explorer) vẫn phải nhúng riêng bằng `embed-resource`.
+46. **App chưa ký:** macOS Gatekeeper (“unidentified developer”) và Windows
+    SmartScreen sẽ cảnh báo; signing/notarization là follow-up ngoài M5.
 
 ## 8. Command thường dùng
 ```bash
 cargo check                    # gate biên dịch
-cargo test                     # 86 passed, 4 ignored
+cargo test                     # 91 passed, 4 ignored
 cargo clippy --all-targets -- -D warnings
 cargo build                    # debug
 ./scripts/verify_local.sh      # gate 4 bước đầy đủ
@@ -305,6 +348,15 @@ cargo run                      # chạy GUI batch-first
 cargo test --test exporter_tests        # 11 test export
 cargo test --test app_worker_tests      # 8 test worker/state
 cargo test --test ui_smoke_tests        # 2 test render headless
+cargo test --test assets_tests          # 5 test icon/plist (M5)
+
+# Icon assets (macOS; output đã commit, chỉ chạy khi đổi icon):
+python3 scripts/make_icons.py
+
+# Release M5 (CHỈ người dùng chạy — không push/tag từ môi trường làm việc):
+git push origin main
+git tag -a v0.1.0 -m "rawpeg v0.1.0"
+git push origin v0.1.0
 
 # RAW thật (ignored):
 RAW_SAMPLE=dir/canon_6d.cr2 cargo test --test decoder_tests decode_real_sample -- --ignored
@@ -318,5 +370,9 @@ cargo run --example render_previews -- rawimage --max-dim 2560
 - TIFF chưa nhúng EXIF; PNG/TIFF 8-bit (chưa có 16-bit output).
 - Chưa có preset export, undo/redo, lưu settings giữa các lần chạy, batch auto-tone
   theo từng ảnh, hay hỗ trợ camera mới hơn 2019.
-- CI release tag/Windows icon vẫn thuộc M5; người dùng trigger build/CI.
-- Không commit/push từ môi trường làm việc này trừ khi được yêu cầu rõ.
+- Icon hiện tại là placeholder sinh bởi `scripts/make_icons.py`; có thể thay artwork
+  bằng PNG 1024×1024 rồi chạy lại script.
+- App chưa ký/notarize: macOS có thể báo “unidentified developer”, Windows SmartScreen
+  cảnh báo; Windows `.exe` chưa có VERSIONINFO (chỉ icon).
+- CI release tag: code sẵn sàng nhưng cần người dùng push tag `v*` và xác nhận
+  (M5 chỉ đổi ✅ sau đó). Không push/trigger CI từ môi trường làm việc này.

@@ -17,10 +17,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGING="$ROOT/target/macos-package"
 APP="$STAGING/rawpeg.app"
 BIN_DIR="$APP/Contents/MacOS"
+RES_DIR="$APP/Contents/Resources"
+VERSION="${RAW_PEG_VERSION:-$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/Cargo.toml" | head -n1)}"
+
+if [ -z "$VERSION" ]; then
+  echo "error: cannot determine version from Cargo.toml" >&2
+  exit 1
+fi
 
 rm -rf "$STAGING"
-mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR" "$RES_DIR"
 cp "$ROOT/.github/macos/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/assets/rawpeg.icns" "$RES_DIR/rawpeg.icns"
+plutil -replace CFBundleVersion -string "$VERSION" "$APP/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 
 if [ -n "$X64_BIN" ]; then
   echo "Merging into universal binary: $ARM_BIN + $X64_BIN"

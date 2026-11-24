@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Raw to JPEG batch processor with a darkroom-style GUI"
 
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0"
+
 [dependencies]
 anyhow = "1"
 eframe = "0.37"
